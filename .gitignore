@@ -1,0 +1,47 @@
+# ---- build ----
+target/
+*.class
+*.jar
+*.war
+!**/src/main/**/target/
+!**/src/test/**/target/
+.mvn/wrapper/maven-wrapper.jar
+
+# ---- node ----
+node_modules/
+dist/
+dist-ssr/
+.pnpm-store/
+*.local
+
+# ---- 凭证与本地配置：永不入库 ----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+credentials/
+secrets/
+src/main/resources/application-local.yml
+
+# ---- IDE ----
+.idea/
+*.iml
+.vscode/
+!.vscode/extensions.json
+.settings/
+.project
+.classpath
+
+# ---- 日志与临时 ----
+logs/
+*.log
+tmp/
+hs_err_pid*.log
+replay_pid*.log
+.DS_Store
+Thumbs.db
