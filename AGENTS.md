@@ -78,10 +78,12 @@ Verified on the development host:
 - Do not add roles, permission tables, authorization annotations, or menu-driven access control.
 - Do not change public request/response shapes, mapper contracts, SQL behavior, or MQ message
   payloads unless the task explicitly requires it.
-- Do not put Apple certificates, private keys, master keys, JWT secrets, database passwords, or
-  one-off local debug configuration into the repository. Local overrides go in
+- Do not put Apple certificates, private keys, master keys, session signing keys, database passwords,
+  or one-off local debug configuration into the repository. Local overrides go in
   `application-local.yml` (gitignored) and `.env` (gitignored); only key names belong in
   `.env.example`.
+- Sessions use sa-token's Redis dao (uuid tokens, state stored in Redis). Do not reintroduce
+  `sa-token-jwt`, `StpLogicJwtForSimple`, or a JWT signing secret.
 - Do not log `auth_entity_id`, `secret_key`, `accessory_uuid`, full PPID lists, or any credential
   material. Log counts and fingerprints instead.
 - Do not hardcode business parameters that `t_tenant_config` already covers (quantity ratio, tokens

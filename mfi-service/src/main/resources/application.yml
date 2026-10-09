@@ -42,6 +42,20 @@ spring:
         acknowledge-mode: auto
         prefetch: 1
 
+  # Redis 承载 sa-token 会话；SN 取号与后续热点缓存复用同一实例
+  data:
+    redis:
+      host: ${MFI_REDIS_HOST:localhost}
+      port: ${MFI_REDIS_PORT:6379}
+      password: ${MFI_REDIS_PASSWORD:}
+      database: ${MFI_REDIS_DATABASE:0}
+      timeout: 5000
+      lettuce:
+        pool:
+          max-active: 16
+          max-idle: 4
+          min-idle: 0
+
   jackson:
     default-property-inclusion: non_null
     serialization:
@@ -71,7 +85,6 @@ sa-token:
   is-share: false
   token-style: uuid
   is-log: false
-  jwt-secret-key: ${MFI_JWT_SECRET_KEY}
 
 springdoc:
   api-docs:

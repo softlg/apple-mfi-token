@@ -76,9 +76,14 @@
                 <artifactId>sa-token-spring-boot3-starter</artifactId>
                 <version>${sa-token.version}</version>
             </dependency>
+            <!--
+              会话存储走 sa-token 的 Redis dao：token 不签名、不落 JWT 密钥，
+              会话数据存 Redis，移除成员可即时失效。
+              sa-token-redis-jackson 传递引入 sa-token-redis-template 与 spring-boot-starter-data-redis。
+            -->
             <dependency>
                 <groupId>cn.dev33</groupId>
-                <artifactId>sa-token-jwt</artifactId>
+                <artifactId>sa-token-redis-jackson</artifactId>
                 <version>${sa-token.version}</version>
             </dependency>
 

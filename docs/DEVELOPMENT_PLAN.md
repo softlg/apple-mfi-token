@@ -79,7 +79,7 @@
 | Spring Boot | 3.4.1 | 是（含 starter-amqp / starter-web / starter-data-redis / starter-validation） |
 | MyBatis-Plus | 3.5.9（`mybatis-plus-spring-boot3-starter` **+ 必须另加 `mybatis-plus-jsqlparser`**） | starter 本地未缓存，P0 已从 Central 拉取成功 |
 | Flyway | 10.20.1 + flyway-mysql | 部分（`flyway-mysql` 本地仅 9.22.3，需下载 10.x） |
-| sa-token | 1.44.0（boot3-starter + jwt + redis-jackson） | 是 |
+| sa-token | 1.44.0（boot3-starter + **redis-jackson**，会话存 Redis；**已去掉 jwt 模块**） | `sa-token-redis-jackson` 由 P0 收尾时从 Central 拉取成功，传递引入 `sa-token-redis-template` 与 `spring-boot-starter-data-redis` |
 | OkHttp | 4.12.0 | 是 |
 | BouncyCastle | bcprov-jdk18on 1.78.1 | 是 |
 | EasyExcel | 4.0.3 | 是 |
@@ -87,7 +87,7 @@
 | mysql-connector-j | 9.1.0 | 是 |
 | springdoc-openapi | 2.8.9 | 是 |
 | Lombok | 1.18.36 | 是 |
-| MySQL / Redis / RabbitMQ | 8.0 / 7.2 / 3.13-management | 由 `docker-compose.yml` 提供 |
+| MySQL / Redis / RabbitMQ | 本机 MySQL 8.0.34（Windows 服务，3306）/ Redis 5.0.14.1（tporadowski 便携版）/ RabbitMQ 3.13.7 + OTP 26.2.5.5（免安装 zip） | 见 §10；`docker-compose.yml` 仍保留给服务器部署 |
 
 `[P0 踩坑]` **MyBatis-Plus 3.5.9 把依赖 JSqlParser 的 inner 拦截器拆成了独立可选模块**，`spring-boot3-starter` 不再自带 `TenantLineInnerInterceptor` 与 `PaginationInnerInterceptor`，只引 starter 会编译期"找不到符号"。必须额外声明 `com.baomidou:mybatis-plus-jsqlparser`（连带 `jsqlparser` 5.0）。本项目的租户隔离完全依赖这两个类，缺一个都没有。
 
@@ -453,18 +453,30 @@ Vite + TypeScript + Pinia + vue-router + Element Plus，`pnpm` 管理。构建�
 
 ## 10. 本地环境
 
-`docker-compose.yml` 提供 `mysql:8.0`、`redis:7.2`、`rabbitmq:3.13-management`，用于有 Docker 的开发机与服务器部署。
+`docker-compose.yml` 提供 `mysql:8.0`、`redis:7.2`、`rabbitmq:3.13-management`，供有 Docker 的开发机与服务器部署使用。
 
-**本机（2026-10-09 实测）无 Docker**，因此：MySQL 直接复用已在运行的 `MySQL80` 服务；Redis 与 RabbitMQ 缺失，其影响与三个应对方案见 §13.3。P0 起即需要向用户索取 MySQL 账号。
+**本机（2026-10-09）无 Docker，且 `winget` 无任何输出（源不可用）**。WSL2 里虽有 Ubuntu，但其虚拟盘在 `C:\Users\esr\AppData\Local\wsl`，走 WSL 等于装进 C 盘，因此按"不占 C 盘"的要求改走 **D 盘免安装归档**：
+
+| 组件 | 位置 | 启动 |
+|---|---|---|
+| Redis 5.0.14.1 | `D:\tools\redis`，数据 `D:\tools\redis\data`，日志 `D:\tools\redis\logs\redis.log` | `Start-Process D:\tools\redis\redis-server.exe -ArgumentList 'D:\tools\redis\mfi.redis.conf'`（只监听 `127.0.0.1:6379`，本机无口令） |
+| Erlang/OTP 26.2.5.5 | `D:\tools\erlang` | 仅需 `ERLANG_HOME` 指向该目录 |
+| RabbitMQ 3.13.7 | `D:\tools\rabbitmq_server-3.13.7`，节点数据与日志 `RABBITMQ_BASE=D:\tools\rabbitmq_var` | `sbin\rabbitmq-server.bat`（前台进程，不注册服务） |
+| MySQL 8.0.34 | 复用已运行的 `MySQL80` 服务（3306，非本次新增） | 已在运行 |
+
+`[选型说明]` RabbitMQ 锁 3.13.x 而非 4.x：4.x 要 OTP 27，而 3.13 与 OTP 26.2 是官方配对，且 3.13 的 release 资产里仍有 `rabbitmq-server-windows-*.zip`。Erlang 必须用 `.zip` 而非 `.exe`——安装器写注册表会触发 UAC，免安装归档不需要管理员权限。
+
+本地开发不必设环境变量：`mfi-service/src/main/resources/application-local.yml`（已被 `.gitignore` 的 `**/application-local.yml` 覆盖，实测 `git check-ignore` 命中）提供数据源、Redis、RabbitMQ，启动加 `-Dspring-boot.run.profiles=local`。首次空库靠 JDBC 的 `createDatabaseIfNotExist=true` 建出 `apple_mfi_token`。
+
+`[已定]` 会话模式：**不启用 sa-token 的 JWT 模式**，不装配 `StpLogicJwtForSimple`，也不再有 `MFI_JWT_SECRET_KEY`。令牌为 uuid，会话数据存 Redis。代价是多实例必须共享同一 Redis（本产品已有 Redis），收益是移除成员/退出登录即时失效且少管理一把密钥。
 
 必需环境变量（写入 `.env`，`.env.example` 只给键名）：
 
 ```
 MFI_DB_URL / MFI_DB_USERNAME / MFI_DB_PASSWORD
-MFI_REDIS_HOST / MFI_REDIS_PORT / MFI_REDIS_PASSWORD
+MFI_REDIS_HOST / MFI_REDIS_PORT / MFI_REDIS_PASSWORD / MFI_REDIS_DATABASE
 MFI_RABBITMQ_HOST / MFI_RABBITMQ_PORT / MFI_RABBITMQ_USERNAME / MFI_RABBITMQ_PASSWORD
 MFI_CREDENTIAL_MASTER_KEY          # Base64 32B，AES-256-GCM 主密钥
-MFI_JWT_SECRET_KEY                 # sa-token jwt 签名密钥
 MFI_SERVER_PORT                    # 默认 8090
 ```
 
@@ -476,7 +488,8 @@ MFI_SERVER_PORT                    # 默认 8090
 
 | 阶段 | 交付内容 | 验收标准 | 预估 |
 |---|---|---|---|
-| **P0** 底座 **（已完成，部分验证受限）** | 父 POM + 3 模块 POM、`.gitignore`、`.gitattributes`、`docker-compose.yml`、`.env.example`、启动类、`application.yml`、Flyway `V1__baseline_schema.sql`（12 张表）、统一响应/异常/6 个枚举、`TenantContext`、MyBatis-Plus 租户拦截器与全局表白名单、sa-token 路由与租户绑定拦截器、`/api/health` | **已验证**：`mvn -B test` 9/9 通过（上下文缺失必须抛错、`runAs` 嵌套还原、白名单仅 2 张表且断言其数量）；DDL 12/12 语句 JSqlParser 解析通过；三模块编译 SUCCESS。<br>**未验证**：空库启动、Flyway 真实建表、`/v3/api-docs` 可访问 —— 阻塞在 MySQL 账号与 `MFI_JWT_SECRET_KEY` |
+| **P0** 底座 **（已完成，本机验收全绿）** | 父 POM + 3 模块 POM、`.gitignore`、`.gitattributes`、`docker-compose.yml`、`.env.example`、启动类、`application.yml`、Flyway `V1__baseline_schema.sql`（12 张表）、统一响应/异常/6 个枚举、`TenantContext`、MyBatis-Plus 租户拦截器与全局表白名单、sa-token 路由与租户绑定拦截器、`/api/health`；收尾追加：会话从 JWT 模式切到 sa-token Redis 模式（删 `StpLogicJwtForSimple` 与 `MFI_JWT_SECRET_KEY`）、补 `spring.data.redis` 配置、修正 `.gitignore` 里根锚定的 `application-local.yml` 路径 | **已验证**：`mvn test` 9/9（上下文缺失必须抛错、`runAs` 嵌套还原、白名单仅 2 张表且断言其数量）；DDL 12/12 JSqlParser 解析；三模块编译与 install SUCCESS；`local` profile 空库启动成功，Flyway 落 `apple_mfi_token` 共 12 张业务表 + `flyway_schema_history`、163 列，`uk_ppid_tenant_ppid_spu`/`uk_token_tenant_entity`/`uk_shard_application_ppid`/`idx_shard_scan`/`uk_credential_tenant` 全部实测存在；`/api/health` 200、`/v3/api-docs` 200（OpenAPI 3.1）、`/swagger-ui` 200、未登录访问 `/api/**` 返回 `{"code":"A0401"}` + HTTP 401 |
+
 
 | **P1** 用户与租户 | register/login/logout/profile/switch-tenant、成员 CRUD、owner 校验注解、密码策略与 Argon2/BCrypt | 双租户双用户互不可见；非 owner 调用 owner 接口返回 403；切换租户后数据随上下文变化 | 1d |
 | **P2** 凭证与客户端 | AES-256-GCM 加解密、密钥轮换位、`MfiSslContextBuilder`（PKCS8/PKCS1）、`MfiClientFactory` + Caffeine、`MfiTokenClient` 9 接口、连通性自检；**自签 CA 与双格式测试证书生成脚本**（§13.2） | 自签证书跑通真实 mTLS 握手；PKCS1 兜底分支被覆盖；密文不落地；客户端实例命中缓存；凭证替换后 evict 生效 | 1d |
@@ -540,29 +553,29 @@ MFI_SERVER_PORT                    # 默认 8090
 
 ### 13.3 本机环境实测结论对验证上限的约束
 
-2026-10-09 实测：
+2026-10-09 实测并已按方案 A 落地：
 
 | 中间件 | 状态 | 影响 |
 |---|---|---|
-| MySQL | **8.0 已装并运行**（服务 `MySQL80`，3306 监听），客户端在 `C:\Program Files\MySQL\MySQL Server 8.0\bin` | P0 Flyway 建表、P1 用户租户、P3 PPID、P4 申请同步段**可本地真实验证**。需要向用户索取库账号 |
-| Redis | **未安装** | SN 生成（§5.6）与 sa-token 会话存储需改造：开发期 sa-token 走默认内存 dao（单机可用，`is-concurrent` 语义在重启后丢失）；SN 需要一个可切换的实现，测试用内存 Fake，生产用 Redis。**不为了跑起来而假造 Redis** |
-| RabbitMQ | **未安装** | P5 五阶段流水线的 broker 接线与 TTL/死信**无法本地验证**。见下方方案 |
+| MySQL | **8.0.34 已装并运行**（服务 `MySQL80`，3306），客户端在 `C:\Program Files\MySQL\MySQL Server 8.0\bin`；账号由用户提供，P0 已用它真实建库建表 | P0 Flyway 建表、P1 用户租户、P3 PPID、P4 申请同步段**已本地真实验证** |
+| Redis | **已装**：`D:\tools\redis`（tporadowski 5.0.14.1 便携版），仅绑 `127.0.0.1:6379`，`PING` 与读写实测通过 | sa-token 会话直接落 Redis（已取消内存 dao 兜底与 JWT 模式）；SN 取号用真实 `INCRBY` |
+| RabbitMQ | **安装中**：`D:\tools\rabbitmq_server-3.13.7`（官方 windows zip），依赖 `D:\tools\erlang`（OTP 26.2.5.5 免安装 zip，下载中） | 装好后 P5 的 TTL 延迟、死信回流、消费幂等可本地验证；在此之前 P5 只做单元测试级验证 |
 | Docker | **未安装** | `docker-compose.yml` 仅作为有 Docker 的环境与服务器部署用，本机起不来 |
+| winget | **命令存在但无任何输出**（源不可用） | 安装一律走 GitHub release 直下 + 解压 |
 
-P5 的应对（三选一，需你定，见 §13.4）：
+P5 的应对（已由用户选定）：
 
-- **A. 本机装 Redis + RabbitMQ**（RabbitMQ 依赖 Erlang，Windows 下需管理员安装；Redis 建议用 tporadowski/Memurai 发行版）。装完 P0–P7 全部可本地验证，是最彻底的一条路。
-- **B. 指一台有中间件的开发服务器**，本机只跑应用。需要外泄开发地址与账号。
-- **C. 分层验证**：P5 的阶段跃迁/CAS/幂等/延迟计算用单元测试直接调 handler（不接 broker）验证；MQ 声明、TTL 回流、DLQ 接线推迟到部署环境验证。**能覆盖最容易出错的纯逻辑，但 broker 接线属未验证风险。**
+- **A. 本机装 Redis + RabbitMQ —— 已选并执行**。补充实测：原以为"Windows 下需管理员安装"，实际 `otp_win64_*.zip` 与 `rabbitmq-server-windows-*.zip` 都是免安装归档，解压到 D 盘 + 设 `ERLANG_HOME`/`RABBITMQ_BASE` 即可跑，**全程不需要管理员权限、不写注册表、不占 C 盘**。
+- B. 指一台有中间件的开发服务器 —— 未采用（会外泄开发地址与账号）。
+- C. 分层验证 —— 保留为兜底：若 RabbitMQ 起不来，P5 的阶段跃迁/CAS/幂等仍用单测直接调 handler 验证。
 
 ### 13.4 仍需你确认
 
-1. **P5 验证方案选 A / B / C**——这是唯一卡住流水线阶段的决定。选 A 我需要你或运维装中间件；我不会未经你同意在你机器上装软件。
-2. **MySQL 账号**：给一个可建库的账号（或告诉我用哪个库名），P0 的 Flyway 验证需要它。我不会猜密码。
-3. **SN 规则**：沿用 MES 的 `SnUtil.generateSnPrefix(ppid)` + 自增，还是租户可配前缀？各厂商命名规则可能不同。
-4. **销毁 token**：是否开放 `destroyUnusedAuthEntities` 给租户自助？不可逆，我按"仅 owner + 二次确认"设计。
-5. **通知渠道**：建议改为邮件 + 可配 webhook，不再用钉钉（MES 那条按 `company_code` 路由到钉钉群，租户是外部厂商时不适用）。
-6. **部署形态**：单进程（后端 + 打包进 `static/` 的前端）还是前后端两个镜像？我默认单进程。
+1. **SN 规则**：沿用 MES 的 `SnUtil.generateSnPrefix(ppid)` + 自增，还是租户可配前缀？各厂商命名规则可能不同。
+2. **销毁 token**：是否开放 `destroyUnusedAuthEntities` 给租户自助？不可逆，我按"仅 owner + 二次确认"设计。
+3. **通知渠道**：建议改为邮件 + 可配 webhook，不再用钉钉（MES 那条按 `company_code` 路由到钉钉群，租户是外部厂商时不适用）。
+4. **部署形态**：单进程（后端 + 打包进 `static/` 的前端）还是前后端两个镜像？我默认单进程。
+5. **仓库可见性**（新增，阻塞推送）：`origin` 实测为 **public**，而 §6.4 写明了 MES 里硬编码凭证的文件与行号。公开前先把它改成 private，或把 §6.4 的路径/行号从文档里摘掉。
 
 
 ---

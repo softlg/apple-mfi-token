@@ -41,9 +41,10 @@
             <groupId>cn.dev33</groupId>
             <artifactId>sa-token-spring-boot3-starter</artifactId>
         </dependency>
+        <!-- 会话存 Redis，替代原 JWT 模式：不再需要 jwt-secret-key -->
         <dependency>
             <groupId>cn.dev33</groupId>
-            <artifactId>sa-token-jwt</artifactId>
+            <artifactId>sa-token-redis-jackson</artifactId>
         </dependency>
 
         <dependency>
