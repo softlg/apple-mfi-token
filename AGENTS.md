@@ -66,6 +66,8 @@ Verified on the development host:
 - Verify each phase before starting the next:
   `mvn -q -DskipTests compile` from the repository root, and the phase acceptance items in
   `docs/DEVELOPMENT_PLAN.md` §11.
+- After a verified feature commit, push the branch to `origin` without waiting for another
+  confirmation (see Commit & PR → Push policy).
 - State verification results clearly, especially when full validation is blocked by environment
   dependencies.
 
@@ -129,6 +131,26 @@ transaction-rollback-does-not-publish-message guarantee.
 
 Follow the existing concise Conventional Commit style used by the team, e.g.
 `feat:Token申请(开启申请流程)`. Keep commits narrowly scoped to one phase or one fix.
+
+### Push policy
+
+The user has given **standing authorization to push**: once a feature or phase is committed and
+verification passes, push the current branch to `origin` without asking again.
+
+- Push only after `mvn -q -DskipTests compile` passes and that phase's acceptance items in
+  `docs/DEVELOPMENT_PLAN.md` §11 are met. This authorization does **not** cover pushing unverified,
+  failing, or half-finished work.
+- One feature = one commit = one push. Do not batch several phases into one push.
+- Push the current branch only. Never `--force`, never `--no-verify`, never amend or rebase a commit
+  that already exists on the remote.
+- Before every commit, run `git status` and confirm nothing unexpected is staged. Credentials,
+  `.env`, `application-local.yml`, `*.pem`, `*.key`, and any certificate material must never reach
+  the remote. `.gitignore` is not a substitute for this check.
+- The remote is GitHub (`origin`). If the repository is public, treat anything already committed as
+  permanently public — never stage real Apple certificates or private keys, even "temporarily".
+- When the remote has moved ahead, integrate it with a merge commit; do not rewrite shared history.
+- If a push fails for a non-code reason (auth, network, protected branch), report it and keep working
+  locally. Do not change git config or the remote URL to force it through.
 
 PRs should summarize the business change, list affected modules, note Flyway migration or config
 impact, describe how tenant isolation was verified, and state explicitly what could not be verified
