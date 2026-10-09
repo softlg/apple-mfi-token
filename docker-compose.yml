@@ -1,0 +1,60 @@
+# 本地/测试环境的中间件底座。
+# 注意：开发机若未安装 Docker（当前主力开发机即如此），请复用已装的 MySQL 服务，
+# Redis 与 RabbitMQ 需按 docs/DEVELOPMENT_PLAN.md §13.3 的方案 A 单独安装。
+#
+# 所有口令均为占位符，实际部署请通过环境变量注入，不要把真实值写进本文件。
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: mfi-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MFI_DB_ROOT_PASSWORD:?set in .env}
+      MYSQL_DATABASE: apple_mfi_token
+      MYSQL_USER: ${MFI_DB_USERNAME:?set in .env}
+      MYSQL_PASSWORD: ${MFI_DB_PASSWORD:?set in .env}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_general_ci
+      - --default-time-zone=+08:00
+    ports:
+      - "3306:3306"
+    volumes:
+      - mfi-mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: mfi-redis
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --requirepass
+      - ${MFI_REDIS_PASSWORD:?set in .env}
+    ports:
+      - "6379:6379"
+    volumes:
+      - mfi-redis-data:/data
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: mfi-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${MFI_RABBITMQ_USERNAME:?set in .env}
+      RABBITMQ_DEFAULT_PASS: ${MFI_RABBITMQ_PASSWORD:?set in .env}
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - mfi-rabbitmq-data:/var/lib/rabbitmq
+
+volumes:
+  mfi-mysql-data:
+  mfi-redis-data:
+  mfi-rabbitmq-data:

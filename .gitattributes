@@ -1,0 +1,28 @@
+# 统一以 LF 入库，避免 Windows 上 Java/SQL/YAML 文件换行符反复抖动
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.xls binary
+*.xlsx binary
+*.doc binary
+*.docx binary
+*.p12 binary
+*.pfx binary
+*.jks binary
+*.keystore binary
+
+*.crt text eol=lf
+*.pem text eol=lf
+*.key text eol=lf
+
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+*.jar binary
+*.war binary

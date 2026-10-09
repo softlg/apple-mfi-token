@@ -1,7 +1,8 @@
 # apple-mfi-token 开发计划
 
-> 状态：**待确认**，未进入编码。确认后按 §11 分期实施。
-> 决策来源：2026-10-09 与需求方对齐的结论，已锁定的项标注 `[已定]`。
+> 状态：**P0 已落地**。`mvn -B test` 全绿（9 项），DDL 经 JSqlParser 离线解析 12/12 通过；
+> **真实建库与应用启动仍未验证**，阻塞在 MySQL 账号（§13.4）。
+> 决策记录见 §13。
 
 ---
 
@@ -76,7 +77,7 @@
 | 依赖 | 版本 | 本地已缓存 |
 |---|---|---|
 | Spring Boot | 3.4.1 | 是（含 starter-amqp / starter-web / starter-data-redis / starter-validation） |
-| MyBatis-Plus | 3.5.9（spring-boot3-starter） | 否，需下载 |
+| MyBatis-Plus | 3.5.9（`mybatis-plus-spring-boot3-starter` **+ 必须另加 `mybatis-plus-jsqlparser`**） | starter 本地未缓存，P0 已从 Central 拉取成功 |
 | Flyway | 10.20.1 + flyway-mysql | 部分（`flyway-mysql` 本地仅 9.22.3，需下载 10.x） |
 | sa-token | 1.44.0（boot3-starter + jwt + redis-jackson） | 是 |
 | OkHttp | 4.12.0 | 是 |
@@ -87,6 +88,8 @@
 | springdoc-openapi | 2.8.9 | 是 |
 | Lombok | 1.18.36 | 是 |
 | MySQL / Redis / RabbitMQ | 8.0 / 7.2 / 3.13-management | 由 `docker-compose.yml` 提供 |
+
+`[P0 踩坑]` **MyBatis-Plus 3.5.9 把依赖 JSqlParser 的 inner 拦截器拆成了独立可选模块**，`spring-boot3-starter` 不再自带 `TenantLineInnerInterceptor` 与 `PaginationInnerInterceptor`，只引 starter 会编译期"找不到符号"。必须额外声明 `com.baomidou:mybatis-plus-jsqlparser`（连带 `jsqlparser` 5.0）。本项目的租户隔离完全依赖这两个类，缺一个都没有。
 
 选 sa-token 而非手写 JWT：它已在本地仓库缓存、自带 Redis 会话存储与多端并发控制，且我们只用它的**认证**API（`login/logout/checkLogin/getLoginId`），不调用任何 `checkRole/checkPermission`——正好贴合"有认证无授权"。
 
@@ -108,7 +111,6 @@ apple-mfi-token/
 ├─ mfi-apple/                   苹果 MFI 客户端（多租户 mTLS）
 │  └─ src/main/java/com/galaplat/mfi/apple/
 │     ├─ MfiTokenClient.java        9 个苹果接口的封装
-│     ├─ MfiClientFactory.java      按租户构造 + Caffeine 缓存
 │     ├─ MfiSslContextBuilder.java  cert/key → SSLContext（PKCS8/PKCS1 兼容）
 │     ├─ model/                     请求体
 │     ├─ response/                  响应体 + 错误码
@@ -118,7 +120,8 @@ apple-mfi-token/
 │     ├─ java/com/galaplat/mfi/dao/
 │     │  ├─ entity/             PO（@TableName）
 │     │  ├─ mapper/             Mapper 接口
-│     │  └─ mybatis/            TenantLineHandler、AutoFill
+│     │  ├─ tenant/             TenantContext、TenantPrincipal、TenantNotBoundException
+│     │  └─ mybatis/            TenantLineHandler、插件装配
 │     └─ resources/db/migration/V*.sql
 └─ mfi-service/                 Spring Boot 应用（可执行）
    └─ src/main/
@@ -126,10 +129,17 @@ apple-mfi-token/
       │  ├─ MfiTokenApplication.java
       │  ├─ controller/         auth / member / credential / ppid / application / token
       │  ├─ service/            业务服务 + impl
+      │  ├─ client/             MfiClientFactory：按租户构造 + Caffeine 缓存
       │  ├─ pipeline/           RabbitMQ 配置、5 阶段监听器、DLQ
-      │  ├─ security/           TenantContext、sa-token 配置、owner 校验
+      │  ├─ security/           租户绑定拦截器、sa-token 装配、owner 校验
       │  ├─ crypto/             凭证 AES-256-GCM 加解密
-      │  ├─ excel/              PPID 导入模板、token 导出
+      │  └─ excel/              PPID 导入模板、token 导出
+```
+
+`[P0 调整]` 两处与初版结构的偏离，都由依赖方向决定：
+
+- **`MfiClientFactory` 从 `mfi-apple` 移到 `mfi-service/client`**。工厂要读 `t_tenant_credential` 并解密，若放在 `mfi-apple` 就得让 `mfi-apple → mfi-dao/crypto`，客户端库被拖进数据库依赖。现在 `mfi-apple` 保持纯 Java + OkHttp，工厂在上层组装。
+- **`TenantContext` 放在 `mfi-dao/tenant` 而非 `mfi-service/security`**。租户拦截器在 DAO 层，它必须能读到上下文；若上下文在上层，`mfi-dao` 就反向依赖 `mfi-service`。放 DAO 层也让"上下文缺失即抛错"的守卫离执行点最近。
       │  └─ common/             统一响应、异常、枚举、分页
       └─ resources/
          ├─ application.yml
@@ -170,13 +180,16 @@ t_tenant_config     id, tenant_id, config_key, config_value, remark
 
 `t_tenant_config` 承载原 MES 里硬编码的业务参数，改为一处可配（缺失时取全局默认）：
 
-| config_key | 全局默认 | MES 原状 |
+| config_key（`TenantConfigKey`） | 全局默认 | MES 原状 |
 |---|---|---|
-| `apply.max_quantity_per_request` | 不限 | 试产订单硬编码 100（`TokenApplyServiceImpl:36`） |
-| `apply.quantity_ratio` | 1.05 | `TokenApplyConfig:22` |
-| `apple.tokens_per_file` | 2000 | `constant/TokenConstant:90` |
-| `apple.register_batch_size` | 1000 | `TokenRegisterListener:33` |
-| `pipeline.max_retry` | 3 | `constant/TokenConstant:84`（写死 2） |
+| `APPLY_MAX_QUANTITY` | 0（不限） | 试产订单硬编码 100（`TokenApplyServiceImpl:36`） |
+| `APPLE_TOKENS_PER_FILE` | 2000 | `constant/TokenConstant:90` |
+| `APPLE_REGISTER_BATCH_SIZE` | 1000 | `TokenRegisterListener:33` |
+| `PIPELINE_MAX_RETRY` | 3 | `constant/TokenConstant:84`（写死 2） |
+| `PIPELINE_CONCURRENT_PER_TENANT` | 2 | 无对应，MES 单租户不需要 |
+| `SERIAL_NUMBER_PREFIX` | 空（用 PPID 派生） | `SnUtil.generateSnPrefix`（§13.4 待定规则） |
+
+`[P0 调整]` MES 的 `apply.quantity_ratio`（订单量 × 1.05，`TokenApplyConfig:22`）**已删除**：新模型没有产品订单概念，申请上限由 PPID 余量与 `APPLY_MAX_QUANTITY` 共同决定，系数无对应语义。
 
 ### 5.3 PPID 池
 
@@ -440,7 +453,9 @@ Vite + TypeScript + Pinia + vue-router + Element Plus，`pnpm` 管理。构建�
 
 ## 10. 本地环境
 
-`docker-compose.yml` 拉起 `mysql:8.0`、`redis:7.2`、`rabbitmq:3.13-management`。
+`docker-compose.yml` 提供 `mysql:8.0`、`redis:7.2`、`rabbitmq:3.13-management`，用于有 Docker 的开发机与服务器部署。
+
+**本机（2026-10-09 实测）无 Docker**，因此：MySQL 直接复用已在运行的 `MySQL80` 服务；Redis 与 RabbitMQ 缺失，其影响与三个应对方案见 §13.3。P0 起即需要向用户索取 MySQL 账号。
 
 必需环境变量（写入 `.env`，`.env.example` 只给键名）：
 
@@ -461,17 +476,19 @@ MFI_SERVER_PORT                    # 默认 8090
 
 | 阶段 | 交付内容 | 验收标准 | 预估 |
 |---|---|---|---|
-| **P0** 底座 | 父 POM + 3 模块 POM、`.gitignore`、`docker-compose.yml`、`.env.example`、启动类、`application.yml`、Flyway `V1__baseline.sql`（全表）、统一响应/异常/枚举、`TenantContext`、MyBatis-Plus 租户拦截器与全局表白名单、sa-token 路由规则 | 空库启动成功、Flyway 建表通过、无租户上下文访问业务 Mapper 抛异常、`/v3/api-docs` 可访问 | 0.5d |
+| **P0** 底座 **（已完成，部分验证受限）** | 父 POM + 3 模块 POM、`.gitignore`、`.gitattributes`、`docker-compose.yml`、`.env.example`、启动类、`application.yml`、Flyway `V1__baseline_schema.sql`（12 张表）、统一响应/异常/6 个枚举、`TenantContext`、MyBatis-Plus 租户拦截器与全局表白名单、sa-token 路由与租户绑定拦截器、`/api/health` | **已验证**：`mvn -B test` 9/9 通过（上下文缺失必须抛错、`runAs` 嵌套还原、白名单仅 2 张表且断言其数量）；DDL 12/12 语句 JSqlParser 解析通过；三模块编译 SUCCESS。<br>**未验证**：空库启动、Flyway 真实建表、`/v3/api-docs` 可访问 —— 阻塞在 MySQL 账号与 `MFI_JWT_SECRET_KEY` |
+
 | **P1** 用户与租户 | register/login/logout/profile/switch-tenant、成员 CRUD、owner 校验注解、密码策略与 Argon2/BCrypt | 双租户双用户互不可见；非 owner 调用 owner 接口返回 403；切换租户后数据随上下文变化 | 1d |
-| **P2** 凭证与客户端 | AES-256-GCM 加解密、密钥轮换位、`MfiSslContextBuilder`（PKCS8/PKCS1）、`MfiClientFactory` + Caffeine、`MfiTokenClient` 9 接口、连通性自检 | 用自签测试证书跑通 SSLContext 构造；密文不落地；客户端实例命中缓存；凭证替换后 evict 生效 | 1d |
+| **P2** 凭证与客户端 | AES-256-GCM 加解密、密钥轮换位、`MfiSslContextBuilder`（PKCS8/PKCS1）、`MfiClientFactory` + Caffeine、`MfiTokenClient` 9 接口、连通性自检；**自签 CA 与双格式测试证书生成脚本**（§13.2） | 自签证书跑通真实 mTLS 握手；PKCS1 兜底分支被覆盖；密文不落地；客户端实例命中缓存；凭证替换后 evict 生效 | 1d |
 | **P3** PPID 池 | CRUD、Excel 导入/模板/导出、余量计算、CAS 条件扣减、`t_tenant_config` 规则读写 | 并发 50 次扣减不超卖；导入逐行错误定位；余量预估与池实际一致 | 1d |
 | **P4** 申请同步段 | 分配算法（型号+SPU 贪心）、事务、AFTER_COMMIT 发消息、`t_application`/`t_application_ppid` 落库、余量接口 | 事务回滚时消息未发出；多 PPID 拆分正确；回滚后余量恢复；重复提交不重复扣减 | 1d |
-| **P5** 异步流水线 | 两 exchange + 6 queue + DLX、5 监听器、延迟计算、CAS 幂等、重试与 DLQ、租户并发闸门、兜底扫描 | **用 WireMock 桩苹果 API 跑通端到端**；重复投递不产生重复 token；苹果未就绪时按 `retryDownloadAfter` 延迟；重试耗尽进 DLQ 且不阻塞其他租户 | 2d |
+| **P5** 异步流水线 | 两 exchange + 6 queue + DLX、5 监听器、延迟计算、CAS 幂等、重试与 DLQ、租户并发闸门、兜底扫描；**自签 CA 要求的 two-way TLS WireMock 桩** | 阶段跃迁/CAS/幂等/延迟计算必须有测试覆盖。**broker 接线（TTL 回流、DLQ、并发闸门）能否验证取决于 §13.4 选 A/B/C**：本机无 RabbitMQ | 2d |
 | **P6** 结果与导出 | token 落库、SN 生成、状态聚合、异步导出任务、进度时间线查询、人工重放、销毁 | 时间线显示 5 阶段真实状态；导出 1 万条不 OOM；重放只作用于失败分片 | 1d |
 | **P7** 前端 | 8 个页面 + 租户切换器 + owner 可见性 + 进度时间线组件 | 浏览器实测完整链路：注册→上传证书→导入 PPID→申请→进度→导出 | 2d |
-| **P8** 联调与验收 | 真证书联调、`docs/mfi-token-flow.md`、日志脱敏复查、跨租户渗透自测、部署说明 | 见下方"最终验收" | 1d |
+| **P8a** 本地安全验收 | `docs/mfi-token-flow.md`、日志脱敏复查、跨租户渗透自测、部署说明、§11 最终验收清单逐项 | 除"真证书联调"外的全部验收项通过 | 1d |
+| **P8b** 真证书联调（**阻塞**） | 拿厂商真实证书后验 §13.2 列出的 5 项未验证风险：真实证书链与 CN 校验、`technology` 取值接受度、真实限流阈值、响应字段与文档一致性、苹果侧 PPID 配额 | 不在本次可交付范围，需外部输入才能启动 | 待定 |
 
-合计约 **10.5 人日**。P0–P4 与苹果真实网络无关可连续推进；P5 起依赖桩或真证书。
+合计约 **10.5 人日**（不含 P8b）。P0–P4 与苹果真实网络无关，且本机有 MySQL，可连续真实验证；P5 的纯逻辑可独立验证，broker 接线取决于 §13.4 的选择；P8b 阻塞在外部输入（真实厂商证书）。
 
 ### 最终验收清单
 
@@ -498,16 +515,55 @@ MFI_SERVER_PORT                    # 默认 8090
 
 ---
 
-## 13. 待你确认的开放问题
+## 13. 决策记录与待确认
 
-1. **PPID 来源**：租户手工录入 / Excel 导入，还是需要从苹果 MFI 门户自动同步？（自动同步需另外的门户凭证，复杂度高，建议 P8 后单开）
-2. **`apple_technology` 取值域**：除 `HomeKit` 外还有哪些？各自 BaseURL 是什么？现有代码只做了 HomeKit 分流。
-3. **SN 规则**：沿用 MES 的 `SnUtil.generateSnPrefix(ppid)` + Redis 自增，还是租户可配前缀？各厂商命名规则不同。
-4. **销毁 token**：是否开放 `destroyUnusedAuthEntities` 给租户自助使用？该操作不可逆，我按"仅 owner + 二次确认"设计。
-5. **通知渠道**：MES 用钉钉群 webhook（按 `company_code` 路由）。新 SaaS 里租户是外部厂商，建议改为**邮件 + 可配 webhook**，不再用钉钉。
-6. **部署形态**：单进程（后端 + 静态前端）Docker 部署，还是前后端分离两个镜像？
-7. **DAO 风格**：认可从 MES 的 plain MyBatis + PageHelper 切到 **MyBatis-Plus + 自动租户改写**吗？（§2，这是租户隔离的前提）
-8. **苹果测试环境**：是否有 sandbox 或可用的测试证书供 P5/P8 联调？无则 P5 只能用 WireMock 桩，真实联调推到 P8。
+### 13.1 已确认（2026-10-09）
+
+| # | 问题 | 结论 | 影响 |
+|---|---|---|---|
+| 1 | DAO 风格 | **切到 MyBatis-Plus** | §2 的租户自动 SQL 改写成立，隔离性由框架保证而非人工拼条件 |
+| 2 | PPID 来源 | **租户手工录入 + Excel 导入**，不做苹果门户自动同步 | 表结构不变；`/api/ppid/import` + 模板为唯一批量入口；不引入第二套门户凭证 |
+| 3 | 苹果测试证书 / sandbox | **没有** | 见下方 §13.2 的应对方案，验证策略随之调整 |
+
+### 13.2 没有真证书，如何验证苹果链路（关键调整）
+
+结论：**mTLS 握手不需要苹果的证书也能完整验证**。做法是在本地建一套自签 CA 测试夹具：
+
+1. 脚本生成 `ca.crt` + 一个由该 CA 签发的**客户端证书/私钥**（PKCS8 与 PKCS1 各一份，覆盖两条加载分支）
+2. 起一个**要求客户端证书**的本地 HTTPS 桩服务（WireMock 支持 two-way TLS），路径与响应体按苹果规范伪造：
+   `requestAuthEntities` 返回 request uuid；`authEntities/{uuid}` 先返回 `downloadAvailability=false` + `retryDownloadAfter`，第二次返回文件名；文件下载返回一份真实构造的 xlsx（含 Provisioning ID / UUID / Secret Key）；`usedAuthEntities/bulk` 返回受理
+3. 租户的 `apple_base_url` 指向该桩，跑通**五阶段全链路 + 延迟 + 重试 + DLQ**
+
+这样能验到的：SSLContext 构造、PKCS1→PKCS8 兜底、mTLS 握手与失败路径、`downloadAvailability` 延迟计算、xlsx 解析入库、阶段 CAS、幂等、重试耗尽。
+
+**验不到的（真证书到位前必须标注为未验证风险）**：苹果真实证书链的可信度与 CN 校验规则、苹果侧对 `technology` 取值的实际接受度、真实限流阈值、生产 `authEntities` 响应字段是否与文档一致、PPID 在苹果侧的配额与有效期。这些留到 §11 的 P8b。
+
+### 13.3 本机环境实测结论对验证上限的约束
+
+2026-10-09 实测：
+
+| 中间件 | 状态 | 影响 |
+|---|---|---|
+| MySQL | **8.0 已装并运行**（服务 `MySQL80`，3306 监听），客户端在 `C:\Program Files\MySQL\MySQL Server 8.0\bin` | P0 Flyway 建表、P1 用户租户、P3 PPID、P4 申请同步段**可本地真实验证**。需要向用户索取库账号 |
+| Redis | **未安装** | SN 生成（§5.6）与 sa-token 会话存储需改造：开发期 sa-token 走默认内存 dao（单机可用，`is-concurrent` 语义在重启后丢失）；SN 需要一个可切换的实现，测试用内存 Fake，生产用 Redis。**不为了跑起来而假造 Redis** |
+| RabbitMQ | **未安装** | P5 五阶段流水线的 broker 接线与 TTL/死信**无法本地验证**。见下方方案 |
+| Docker | **未安装** | `docker-compose.yml` 仅作为有 Docker 的环境与服务器部署用，本机起不来 |
+
+P5 的应对（三选一，需你定，见 §13.4）：
+
+- **A. 本机装 Redis + RabbitMQ**（RabbitMQ 依赖 Erlang，Windows 下需管理员安装；Redis 建议用 tporadowski/Memurai 发行版）。装完 P0–P7 全部可本地验证，是最彻底的一条路。
+- **B. 指一台有中间件的开发服务器**，本机只跑应用。需要外泄开发地址与账号。
+- **C. 分层验证**：P5 的阶段跃迁/CAS/幂等/延迟计算用单元测试直接调 handler（不接 broker）验证；MQ 声明、TTL 回流、DLQ 接线推迟到部署环境验证。**能覆盖最容易出错的纯逻辑，但 broker 接线属未验证风险。**
+
+### 13.4 仍需你确认
+
+1. **P5 验证方案选 A / B / C**——这是唯一卡住流水线阶段的决定。选 A 我需要你或运维装中间件；我不会未经你同意在你机器上装软件。
+2. **MySQL 账号**：给一个可建库的账号（或告诉我用哪个库名），P0 的 Flyway 验证需要它。我不会猜密码。
+3. **SN 规则**：沿用 MES 的 `SnUtil.generateSnPrefix(ppid)` + 自增，还是租户可配前缀？各厂商命名规则可能不同。
+4. **销毁 token**：是否开放 `destroyUnusedAuthEntities` 给租户自助？不可逆，我按"仅 owner + 二次确认"设计。
+5. **通知渠道**：建议改为邮件 + 可配 webhook，不再用钉钉（MES 那条按 `company_code` 路由到钉钉群，租户是外部厂商时不适用）。
+6. **部署形态**：单进程（后端 + 打包进 `static/` 的前端）还是前后端两个镜像？我默认单进程。
+
 
 ---
 

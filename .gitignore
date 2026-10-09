@@ -26,7 +26,10 @@ dist-ssr/
 *.keystore
 credentials/
 secrets/
-src/main/resources/application-local.yml
+# 本地覆盖配置可出现在任意模块，根锚定的 src/... 路径匹配不到 mfi-service/src/...
+**/application-local.yml
+**/application-local.yaml
+**/application-*.local.yml
 
 # ---- IDE ----
 .idea/

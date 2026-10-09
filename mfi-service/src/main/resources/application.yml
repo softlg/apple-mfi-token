@@ -1,0 +1,88 @@
+server:
+  port: ${MFI_SERVER_PORT:8090}
+  error:
+    include-message: always
+
+spring:
+  application:
+    name: apple-mfi-token
+
+  # 数据源：用户名与密码不设默认值，缺失即启动失败，避免把账号写进仓库
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: ${MFI_DB_URL:jdbc:mysql://localhost:3306/apple_mfi_token?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true}
+    username: ${MFI_DB_USERNAME}
+    password: ${MFI_DB_PASSWORD}
+    hikari:
+      maximum-pool-size: 16
+      minimum-idle: 2
+      connection-timeout: 10000
+
+  # Flyway 全量托管 DDL，禁止手工改库
+  flyway:
+    enabled: true
+    validate-on-migrate: true
+    # create-schemas 让 Flyway 在目标库不存在时尝试 CREATE DATABASE；
+    # 连接账号无建库权限时仍需 DBA 预先创建 apple_mfi_token 库
+    create-schemas: true
+    baseline-on-migrate: true
+    locations: classpath:db/migration
+
+  rabbitmq:
+    host: ${MFI_RABBITMQ_HOST:localhost}
+    port: ${MFI_RABBITMQ_PORT:5672}
+    username: ${MFI_RABBITMQ_USERNAME:guest}
+    password: ${MFI_RABBITMQ_PASSWORD:guest}
+    virtual-host: ${MFI_RABBITMQ_VHOST:/}
+    listener:
+      simple:
+        # 重试由业务层的 retry_count + 延迟队列控制，这里关闭 Spring 自带重试避免双重语义
+        retry:
+          enabled: false
+        acknowledge-mode: auto
+        prefetch: 1
+
+  jackson:
+    default-property-inclusion: non_null
+    serialization:
+      write-dates-as-timestamps: false
+
+  mvc:
+    problemdetails:
+      enabled: false
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    banner: false
+    db-config:
+      id-type: auto
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+
+# 只做认证，不装配任何角色/权限校验
+sa-token:
+  token-name: mfi-token
+  timeout: 43200
+  active-timeout: -1
+  is-concurrent: true
+  is-share: false
+  token-style: uuid
+  is-log: false
+  jwt-secret-key: ${MFI_JWT_SECRET_KEY}
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    operations-sorter: method
+
+logging:
+  level:
+    root: INFO
+    com.galaplat.mfi: DEBUG
+    # 严禁把凭证与 token 明细打进日志，SQL 调试只在本地开
+    com.galaplat.mfi.dao.mapper: DEBUG
