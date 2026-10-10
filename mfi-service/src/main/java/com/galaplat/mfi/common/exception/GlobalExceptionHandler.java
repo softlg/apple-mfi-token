@@ -13,6 +13,7 @@ import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
 
 /**
  * 全局异常处理。
@@ -72,6 +73,15 @@ public class GlobalExceptionHandler {
                 .reduce((a, b) -> a + "; " + b)
                 .orElse(ErrorCode.INVALID_PARAM.getMessage());
         return status(HttpStatus.BAD_REQUEST, R.fail(ErrorCode.INVALID_PARAM, detail));
+    }
+
+    /**
+     * 上传体积超过 servlet.multipart 上限。不接住会变成 500，而这是用户操作能直接造成的结果。
+     */
+    @ExceptionHandler(MaxUploadSizeExceededException.class)
+    public ResponseEntity<R<Void>> onTooLarge(MaxUploadSizeExceededException e) {
+        log.info("上传文件超出体积上限: maxBytes={}", e.getMaxUploadSize());
+        return status(HttpStatus.BAD_REQUEST, R.fail(ErrorCode.INVALID_PARAM, "文件过大，请拆分后分批导入"));
     }
 
     @ExceptionHandler(Exception.class)

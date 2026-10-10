@@ -251,7 +251,12 @@ t_operation_log     id, tenant_id, application_id, action, operator_user_id,
 
 ### 5.6 序列号
 
-`manufacture_sn` 由本服务生成，沿用 MES 的 Redis 自增方案（`CodeComponent` 无外部依赖，实测可自建）：key = `mfi:sn:{tenantId}:{ppid}:{yyyyMMdd}`，`INCRBY` 批量取号，`SnUtil` 的前缀规则移植到新仓库。
+`manufacture_sn` 由本服务生成，沿用 MES 的 Redis 自增方案（`CodeComponent` 无外部依赖，实测可自建）：key = `mfi:sn:{tenantId}:{ppid}:{spu}:{yyyyMMdd}`，`INCRBY` 批量取号，`SnUtil` 的前缀规则移植到新仓库。
+
+`[P3 期间的修正]` 原计划写的是 `mfi:sn:{tenantId}:{ppid}:{yyyyMMdd}`（照抄 MES）。但本仓库 `t_ppid` 的唯一键是
+`uk_ppid_tenant_ppid_spu(tenant_id, ppid, spu)`，也就是**同一个 PPID 允许挂多个 SPU**；取号 key 不带 `spu` 就会让两个
+SPU 共用一条计数器，各自批量取号后 `SnUtil` 前缀相同、序号互相跳过，跨厂商对账时无法解释。因此 key 必须补上 `spu` 段，
+与唯一键的粒度对齐。P6 落 SN 时按这条实现。
 
 ---
 
@@ -285,6 +290,10 @@ MfiTokenClient client = mfiClientFactory.getClient(tenantId);
 ### 6.3 日志红线
 
 `auth_entity_id`、`secret_key`、`accessory_uuid`、PPID 全量列表一律不得出现在日志。MES 里有 `log.info("...: {}", JSON.toJSONString(...))` 直接打整个 token 列表的写法（如 `registerUsedAuthEntitiesBulk` 打 `authEntities`），移植时必须改为打数量与 ID 摘要。
+
+红线不只约束自己写的日志语句，也约束**日志级别配置**：`logging.level.<mapper 包>: DEBUG` 会让 MyBatis 把每条 SQL 连同占位符实参整行输出，
+PPID、凭证密文、其他租户的数据都会随之落盘，而这类泄露不会出现在 code review 的 diff 里。P3 就踩过一次（§11 的 P3 偏差第 7 条），
+现在入库的 `application.yml` 固定 `com.galaplat.mfi.dao.mapper: INFO`，SQL 调试只能在 gitignored 的 `application-local.yml` 里临时取消注释。
 
 ---
 
@@ -409,6 +418,7 @@ PUT    /api/tenant/profile              租户基本信息（名称/technology�
 
 ```
 GET    /api/ppid/page               分页 + 型号/SPU/状态筛选
+GET    /api/ppid/stats              池内份额/已申请/剩余汇总（页面顶部卡片）
 POST   /api/ppid                    新增
 PUT    /api/ppid/{id}               修改
 DELETE /api/ppid/{id}               停用
@@ -426,8 +436,11 @@ GET    /api/applications/page               申请单列表
 GET    /api/applications/{no}               详情 + 阶段时间线
 GET    /api/applications/{no}/files         文件明细
 POST   /api/applications/{no}/retry         人工重放（替代 MES 11 个补偿端点）
-GET    /api/quotas/remain?productModel=&spu=  余量预估
+```
 
+余量预估不另开 `/api/quotas/remain`：P3 已交付的 `GET /api/ppid/available` 就是同一份语义（同一 service 方法、同一条 SQL），P4 直接复用，避免两个端点各算各的。
+
+```
 GET    /api/tokens/page                     token 查询（状态/PPID/申请单筛选）
 POST   /api/tokens/export                   异步导出任务（CSV/XLSX）
 GET    /api/export-tasks/{id}               任务状态与下载链接
@@ -490,6 +503,25 @@ RABBITMQ_LOG_BASE=D:\tools\rabbitmq_var\log
 
 单模块启动要先 `mvn -DskipTests install`：只给 `-pl mfi-service` 时 `mfi-apple`/`mfi-dao` 的 SNAPSHOT 不在本地仓库，依赖解析直接失败。
 
+`[实测的验证入口]`
+
+```
+# 单元测试（dao 新增类时必须带 -am，否则用到本地仓库里的旧 jar）
+mvn -o -pl mfi-service -am test
+
+# 打真实 MySQL 的并发 CAS 集成测试：默认跳过，需要显式开关与库账号
+# 库账号在本机 application-local.yml 里（gitignored），命令行按需导出，不写进仓库
+MFI_IT_DB=1 MFI_DB_USERNAME=<本地库账号> MFI_DB_PASSWORD=<本地库口令> mvn -o -pl mfi-dao -am test
+
+# 起应用（凭证主密钥与自签 CA 只从环境变量进，来源是 gitignored 的 .dev-certs/）
+MFI_CREDENTIAL_MASTER_KEY=$(cat .dev-certs/master-key.txt) \
+MFI_APPLE_TRUSTED_CA_PEM="$(cat .dev-certs/ca.crt)" \
+  mvn -o -pl mfi-service spring-boot:run -Dspring-boot.run.arguments=--spring.profiles.active=local
+
+# 活体验收（对 8090 与真实库跑断言，脚本自带随机 stamp 所以可重复执行）
+PYTHONIOENCODING=utf-8 MFI_DB_USERNAME=<本地库账号> MFI_DB_PASSWORD=<本地库口令> python scripts/verify-p3.py
+```
+
 `[已定]` 会话模式：**不启用 sa-token 的 JWT 模式**，不装配 `StpLogicJwtForSimple`，也不再有 `MFI_JWT_SECRET_KEY`。令牌为 uuid，会话数据存 Redis。代价是多实例必须共享同一 Redis（本产品已有 Redis），收益是移除成员/退出登录即时失效且少管理一把密钥。
 
 必需环境变量（写入 `.env`，`.env.example` 只给键名）：
@@ -515,7 +547,7 @@ MFI_SERVER_PORT                    # 默认 8090
 
 | **P1** 用户与租户 **（已完成，本机验收全绿）** | register/login/logout/profile/switch-tenant、成员列表/邀请/启停/移除/转让 owner、`TenantAccess` 两道入口守卫、Argon2id 密码哈希（`spring-security-crypto` + 显式带 BouncyCastle）；收尾追加：**owner 位不再缓存进会话**，`TenantBindingInterceptor` 每请求回库取成员与租户状态，会话只留"当前租户 ID"这一选择偏好；`BizException` 按错误码分流 HTTP（NOT_OWNER→403、UNAUTHORIZED/BAD_CREDENTIALS→401、其余→400）；`TenantMemberMapper` 只保留 `selectByUserId`/`selectByTenantAndUser` 两条按 user_id 自缚的放行查询 | **已验证**（对真实 MySQL + Redis 跑 33 项断言，0 失败）：4 租户 8 账号下各租户成员列表互不可见；A 拿乙租户成员 ID 做删除被当作"不存在"拒掉且乙租户数据无变化；C 在甲/乙之间切换后 `/api/members` 结果随上下文变化；非 owner 移除成员与转让 owner 返回 HTTP 403 + `A0403`；成员被停用后原会话立刻拿不到租户上下文（`A0410`），重新启用即恢复；转让 owner 后操作人下一次请求即失去权限、目标成员立刻获得，该租户仍恰好 1 个 owner（库内 `having owners<>1` 零行）；账号不存在与密码错误返回同码同文案；`t_user.password_hash` 全为 `$argon2id$v` 前缀；Redis 实测 `mfi-token:login:session:<userId>` 的 `dataMap` 仅含 `currentTenantId`，令牌为 uuid 且不含 JWT 结构；SQL 日志实测业务表带 `deleted = 0 AND tenant_id = N`、放行查询不带 tenant_id、`insert` 由拦截器补 `tenant_id` | 1d |
 | **P2** 凭证与客户端 **（已完成，本机验收 48/48）** | AES-256-GCM 加解密（AAD 绑 `tenant_id` + 字段名）、密钥环与 `encrypt_key_id` 轮换位、`MfiSslContextBuilder`（PKCS#8/PKCS#1 双格式 + 私钥/证书配对预检）、`MfiClientFactory`（Caffeine，512 租户上限 + 30 分钟 `expireAfterAccess` 兼作明文私钥驻留上限）、`MfiTokenClient` 9 接口、`MfiProbeService` 连通性自检、`TenantProfileService`/`TenantConfigService` 与 owner 守卫的 `TenantController`/`TenantCredentialController`；**自签联调材料**：`scripts/gen-dev-certs.sh`（CA + 服务端 + PKCS#8/PKCS#1 两套租户证书 + 一张过期证书，写到 gitignored 的 `.dev-certs/`）、`scripts/MfiStubServer.java`（JDK 单文件源码启动的 two-way TLS 桩，`needClientAuth`）、`scripts/verify-p2.py`（活体验收脚本） | **已验证**：`mvn test` 36/36（apple 12 含 4 个**真实 mTLS 握手**：PKCS#8 与 PKCS#1 各自握手成功且桩侧读到客户端证书 DN、他签 CA 的客户端被拒且请求数为 0、不受信服务端被拒；8 个 `MfiSslContextBuilder` 断言含"A 证书 + B 私钥"配对检测为 false；15 个 service 断言含跨租户 AAD 替换解密失败、轮换后 v0 历史密文仍可解、密钥环空/未知 activeKeyId/非 Base64/16 字节全部启动期拒绝）；对真实 MySQL + Redis + 本地 mTLS 桩跑 **48 项活体断言，0 失败**：垃圾 PEM/不配对/过期证书三道校验（过期给 `B0410`）、PKCS#1 链式材料入库、`verify` 返回 `reachable=true, httpStatus=200` 且桩侧日志出现 `clientCert=CN=MFI Tenant B Client`、库内 `cert_cipher`/`key_cipher` 无 `BEGIN` 标记且互不相同、`encrypt_key_id=v1` 与指纹一致、应用日志私钥文本增量 0、**两次自检只装配 1 次客户端**（命中缓存）、替换凭证后重新装配 +1 且桩侧看到新证书主体、跨租户读不到凭证（`B0404`）、非 owner 改凭证与改业务参数均 HTTP 403 + `A0403`、删除凭证后自检给业务错误而非 500；`.gitignore` 补 `*.crt`/`.dev-certs/`/`__pycache__/` 并实测 `git check-ignore` 命中 | 1d |
-| **P3** PPID 池 | CRUD、Excel 导入/模板/导出、余量计算、CAS 条件扣减、`t_tenant_config` 规则读写 | 并发 50 次扣减不超卖；导入逐行错误定位；余量预估与池实际一致 | 1d |
+| **P3** PPID 池 **（已完成，本机验收 59/59）** | `PpIdMapper` 的 CAS 条件扣减/回补 SQL、`PpIdService`（分页 CRUD、停用作废、按型号+SPU 的余量预估）、Excel 导入/模板/导出（EasyExcel 4.0.3，列序即契约）、`/api/ppid` 9 个端点、`PageResult` 统一分页响应、`MaxUploadSizeExceededException` 全局处理；**测试资产**：`PpIdServiceTest`（12 项，含 `MockMultipartFile` + EasyExcel 真实读写往返）、`PpIdDeductConcurrencyTest`（对真实 MySQL 的并发 CAS，`MFI_IT_DB=1` 才启用）、`scripts/verify-p3.py`（活体验收） | **已验证**：`mvn -o -pl mfi-service -am test` 48/48（apple 12 + dao 9 + service 27，其中新增 12 项覆盖贪心拆分预估、`total<applied` 拒绝、"启用但余量为 0"拒绝、人工改总量必带 `applied_quantity` 快照条件、停用绝不 `deleteById`、导入行号/分块 500/`"100.0"` 放行/重导报"已存在"）；`MFI_IT_DB=1 mvn -o -pl mfi-dao -am test` 12/12，其中 3 项打真实 MySQL：**50 线程各扣 1 打到 40 份额度恰好 40 成功**、`applied=40 remaining=0` 且自动停用、余量 3 扣 5 不改一行、SQL 手工把停用行改回启用后再扣仍 0 影响；活体 59/59（真实 MySQL + Redis）：模板列序与 RFC 5987 文件名、重复 PPID+SPU 拒绝、分页四类筛选、预估与库内实际一致、非法文件逐行报错 `[3,4,5,6]` 且 `insertedRows=0`、1200 行整份入库后 stats 对齐、导出中文状态、**跨租户 8 项**（B 查不到/改不动/停不掉 A 的行、同 PPID+SPU 在 B 可独立导入、B 导出只含自己）、openapi 不泄漏库列名；`grep -ac 'P3-IMP' 运行日志` = 0 | 1d |
 | **P4** 申请同步段 | 分配算法（型号+SPU 贪心）、事务、AFTER_COMMIT 发消息、`t_application`/`t_application_ppid` 落库、余量接口 | 事务回滚时消息未发出；多 PPID 拆分正确；回滚后余量恢复；重复提交不重复扣减 | 1d |
 | **P5** 异步流水线 | 两 exchange + 6 queue + DLX、5 监听器、延迟计算、CAS 幂等、重试与 DLQ、租户并发闸门、兜底扫描；**自签 CA 要求的 two-way TLS WireMock 桩** | 阶段跃迁/CAS/幂等/延迟计算必须有测试覆盖。**broker 接线（TTL 回流、DLQ、并发闸门）本机已具备验证条件**：RabbitMQ 3.13.7 + OTP 26.2.5.5 已在 D 盘跑起（§10、§13.3） | 2d |
 | **P6** 结果与导出 | token 落库、SN 生成、状态聚合、异步导出任务、进度时间线查询、人工重放、销毁 | 时间线显示 5 阶段真实状态；导出 1 万条不 OOM；重放只作用于失败分片 | 1d |
@@ -533,11 +565,43 @@ MFI_SERVER_PORT                    # 默认 8090
 4. 新增错误码 `CREDENTIAL_INVALID("B0500")`，把"库里的材料不可用"（解密失败、证书与私钥不配对）与"未配置"（`B0404`）、"已过期"（`B0410`）分成三态。
 5. 业务参数的"留空"语义落到实现：`TenantConfigService.update` 对空值删除覆盖行而不是写入空串，读取时自然回落到 `TenantConfigKey` 默认值，`overridden` 随之回到 false。
 
+### P3 编码期偏离与踩坑（活体验收与日志审计暴露，记录以免复发）
+
+1. **导入改为"整份文件或留或走"**：计划里写的是"合法行入库 + 非法行报行号"。实测那样更坑用户——部分成功后再导同一份文件，
+   已入库的行会报"已存在"，用户无法分辨哪些量真的进了池，而 PPID 是账本，含糊不得。现在先全量校验（含文件内自重复与库内冲突），
+   有任何一行不合法就一行都不写，逐行错误照样给到 Excel 界面行号（表头算第 1 行）。
+2. **模板与导出文件不入库**：`.xlsx` 二进制进 git 无法 review，且列序一改就会静默不一致。改为 EasyExcel 运行时生成，
+   列序由 `@ExcelProperty(index=)` 固定并在类的 javadoc 里写明"列序即对外契约"；验收脚本直接断言下载文件的表头顺序。
+3. **监听器不抛业务异常**：EasyExcel 会把 `invoke` 里的异常再包一层 `ExcelAnalysisException`，`GlobalExceptionHandler`
+   拿不到原始业务消息，用户只会看到 500。行数超限改成置 `overflow` 标志、读完再判，报错文案回到 `BizException`。
+4. **导入单元格一律按 String 读**：一旦声明 `Integer`，某格写成 `"100.0"` 或文本"一百"就会让整份文件在转换阶段中断，
+   错误信息是 EasyExcel 的转换器堆栈而不是"第 N 行"。改 String 后自己解析，`100.0` 用
+   `BigDecimal.stripTrailingZeros().scale()>0` 判过再 `intValueExact()`，非整数才报行号。
+5. **人工改总量必须带"已申请量未变"条件**：分配线程随时在 CAS 扣减，按旧快照写回 `total/remaining` 会把中间刚扣掉的量
+   覆盖掉，等于凭空多出额度。`update` 用 `WHERE id=? AND applied_quantity=<读到的快照>`，影响 0 行就返回"这份额度刚被申请占用，请刷新后重试"。
+   单测用 `ArgumentCaptor<LambdaUpdateWrapper>` 断言 SQL 段含 `applied_quantity` 且参数含该快照。
+6. **MySQL 单表 UPDATE 的 SET 是从左往右求值**：`deduct` 要"这次扣完就没余量了就顺手停用"，`status` 就必须排在
+   `remaining_quantity` **之前**——此时它读到的还是扣减前的余量，`case when remaining_quantity <= #{quantity} then 0` 才成立；
+   写反了就会拿扣减后的值判断，边界那一笔（正好扣到 0）漏停用。已写进 mapper 注释，并由"余量归零后该行 status=0"的并发测试钉住。
+7. **`com.galaplat.mfi.dao.mapper: DEBUG` 曾写在入库的 `application.yml` 里**：MyBatis 的 DEBUG 会把每条 SQL 的占位符实参整行打进日志，
+   实测一次验收后运行日志里能 `grep` 到 30 处 PPID 明文——这与本节上一段（§6.3）的红线直接冲突，而注释就写在它上面一行。
+   现基础配置固定 `INFO`，要查 SQL 只能在 gitignored 的 `application-local.yml` 里取消注释（示例文件同样给出注释块和警告），
+   部署配置里不得出现。改完重启重跑活体验收 59/59，`grep -ac 'Preparing\|Parameters' 运行日志` = 0。
+8. **构建陷阱**：`mvn -o -pl mfi-service test` 不带 `-am` 会从本地仓库拿旧的 `mfi-dao` jar，报"找不到符号 PpIdPO/PpIdMapper"，
+   看起来像代码坏了。dao 有新增类时一律带 `-am`。
+9. **`-Dtest` 之外还需要环境变量**：真实 MySQL 的并发 CAS 测试用 `@EnabledIfEnvironmentVariable(named="MFI_IT_DB")` 门控，
+   默认跳过，避免 CI/他人机器没有库时报错；跑法见 §10。
+10. **"租户级配额规则"没有落在 P3**：原 P3 交付项写了 `t_tenant_config` 规则读写，实测 P2 的 `TenantConfigService` 已经把
+    6 个键（含 `APPLY_MAX_QUANTITY`）的读写、留空回落默认值与 owner 守卫做完，P3 再实现一遍只会造成两套语义。
+    真正的缺口是**执行点**：`APPLY_MAX_QUANTITY` 目前只是存着，没人读它拦申请。这属于申请事务的一部分，落到 P4 与
+    `deduct` 同一事务内生效，避免"预估放行、提交后才发现超限"。
+
 ### 最终验收清单
 
 - [ ] 两个租户各用独立证书并发申请，数据、PPID、token 完全隔离
 - [ ] 任一租户证书错误/过期不影响其他租户消费
 - [ ] 全程无明文凭证与 `secret_key` 出现在日志
+- [ ] 运行日志 `grep` 不到 PPID 明文，也 `grep` 不到 SQL 的 `==> Parameters`（入库配置里 mapper 包必须是 INFO，见 §6.3）
 - [ ] 无角色表、无权限点、前端无权限树（确认"不做权限管理"落地）
 - [ ] `mvn -q -DskipTests compile` 与 `mvn test` 全绿
 - [ ] 断掉 MQ 重启后，兜底扫描能自愈未完成分片
@@ -621,8 +685,9 @@ P5 的应对（已由用户选定）：
 
 ## 14. 下一步
 
-P0、P1、P2 已交付并本机验收（§11）。P2 交付的不只是凭证链路本身：`MfiClientFactory` 已经把"每租户一套证书 +
-可复用连接池 + 变更即失效"这一层做实，后续任何苹果调用都只依赖 `forTenant(tenantId)`。接下来进入 **P3 PPID 池**：
-CRUD、Excel 导入（逐行错误定位）、按产品型号 + SPU 的余量预估、以及带条件的原子扣减——P4 的分配算法要直接建在
-P3 的扣减语义上，所以这里的 CAS 与索引必须先定死。P5 再把 §13.2 的本地 mTLS 桩接进五阶段流水线。
+P0、P1、P2、P3 已交付并本机验收（§11）。P3 把账本这一层做实了：`t_ppid` 的三量（total/applied/remaining）只由
+`deduct`/`restore` 两条 CAS SQL 改动，人工改总量必带 `applied_quantity` 快照条件，余量归零自动停用，且 50 线程并发实测不超卖。
+接下来进入 **P4 申请同步段**：一次事务内完成 `APPLY_MAX_QUANTITY` 闸门 → 按型号+SPU 的贪心分配 → `deduct` →
+`t_application`/`t_application_ppid` 落库，`AFTER_COMMIT` 才发消息——P3 留下的执行点（超限拦截）就在这里补上，
+而 P3 的拆分预估与 `deduct` 语义已经被测试钉死，P4 只需把它们串起来，不再改动 PPID 层的 SQL。P5 再把 §13.2 的本地 mTLS 桩接进五阶段流水线。
 编码过程中的偏离会在本文档同步更新。

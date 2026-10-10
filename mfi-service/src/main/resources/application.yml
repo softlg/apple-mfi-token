@@ -7,6 +7,13 @@ spring:
   application:
     name: apple-mfi-token
 
+  # PPID Excel 导入的体积上限。服务端另有 20000 行的行数上限，这里先把明显超限的文件挡在解析之前，
+  # 避免 Tomcat 把整个请求读进内存之后才由业务层拒绝
+  servlet:
+    multipart:
+      max-file-size: 20MB
+      max-request-size: 25MB
+
   # 数据源：用户名与密码不设默认值，缺失即启动失败，避免把账号写进仓库
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
@@ -109,5 +116,6 @@ logging:
   level:
     root: INFO
     com.galaplat.mfi: DEBUG
-    # 严禁把凭证与 token 明细打进日志，SQL 调试只在本地开
-    com.galaplat.mfi.dao.mapper: DEBUG
+    # mapper 必须停在 INFO：DEBUG 会把 SQL 与占位符实参整条打进日志，
+    # 里面就是 PPID、凭证密文这类租户数据。本地要查 SQL 只在 application-local.yml 里开。
+    com.galaplat.mfi.dao.mapper: INFO

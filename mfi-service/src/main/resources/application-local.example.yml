@@ -22,3 +22,9 @@ spring:
     port: 5672
     username: CHANGE_ME
     password: CHANGE_ME
+
+# 需要看 SQL 时才取消注释。DEBUG 会把占位符实参整条打进日志，内容含 PPID 与凭证密文，
+# 因此只允许存在于本地的 application-local.yml，绝不能出现在部署配置里。
+#logging:
+#  level:
+#    com.galaplat.mfi.dao.mapper: DEBUG
