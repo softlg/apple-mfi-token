@@ -1,0 +1,384 @@
+package com.galaplat.mfi.service.application.impl;
+
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.metadata.IPage;
+import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.galaplat.mfi.common.api.ErrorCode;
+import com.galaplat.mfi.common.api.PageResult;
+import com.galaplat.mfi.common.enums.ApplicationStatus;
+import com.galaplat.mfi.common.enums.OperationAction;
+import com.galaplat.mfi.common.enums.Stage;
+import com.galaplat.mfi.common.enums.StageStatus;
+import com.galaplat.mfi.common.enums.TenantConfigKey;
+import com.galaplat.mfi.common.exception.BizException;
+import com.galaplat.mfi.apple.MfiEndpoints;
+import com.galaplat.mfi.credential.CredentialService;
+import com.galaplat.mfi.dao.entity.ApplicationPO;
+import com.galaplat.mfi.dao.entity.ApplicationPpidPO;
+import com.galaplat.mfi.dao.entity.OperationLogPO;
+import com.galaplat.mfi.dao.entity.TenantPO;
+import com.galaplat.mfi.dao.entity.UserPO;
+import com.galaplat.mfi.dao.mapper.ApplicationMapper;
+import com.galaplat.mfi.dao.mapper.ApplicationPpidMapper;
+import com.galaplat.mfi.dao.mapper.OperationLogMapper;
+import com.galaplat.mfi.dao.mapper.PpIdMapper;
+import com.galaplat.mfi.dao.mapper.TenantMapper;
+import com.galaplat.mfi.dao.mapper.UserMapper;
+import com.galaplat.mfi.model.request.ApplyCreateRequest;
+import com.galaplat.mfi.model.request.ApplicationPageRequest;
+import com.galaplat.mfi.model.vo.ApplicationShardVo;
+import com.galaplat.mfi.model.vo.ApplicationVo;
+import com.galaplat.mfi.model.vo.ApplySubmitVo;
+import com.galaplat.mfi.model.vo.CredentialVo;
+import com.galaplat.mfi.model.vo.PpIdPlanVo;
+import com.galaplat.mfi.mq.ShardMessageProducer;
+import com.galaplat.mfi.mq.StageMessage;
+import com.galaplat.mfi.security.TenantAccess;
+import com.galaplat.mfi.service.application.ApplicationService;
+import com.galaplat.mfi.service.ppid.PpIdService;
+import com.galaplat.mfi.service.tenant.TenantConfigService;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DuplicateKeyException;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionTemplate;
+
+import java.security.SecureRandom;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * 申请同步段。
+ *
+ * <p>顺序上有三条硬约束：
+ * <ol>
+ *   <li>凭证检查放在扣减之前——证书缺失或已过期的租户不该先吃掉额度再失败；</li>
+ *   <li>申请单插入放在扣减之前——幂等键撞库时立刻失败，本次事务一笔扣减都还没做；</li>
+ *   <li>消息登记在事务内、投递在提交后，见 {@link ShardMessageProducer}。</li>
+ * </ol>
+ */
+@Slf4j
+@Service
+public class ApplicationServiceImpl implements ApplicationService {
+
+    /** 单号里的日期段，只做可读性用途，唯一性由随机段保证 */
+    private static final DateTimeFormatter NO_DATE = DateTimeFormatter.ofPattern("yyMMdd");
+
+    /** 单号随机段字符集：去掉易混字符，人工报障时不容易念错 */
+    private static final char[] NO_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ".toCharArray();
+
+    private static final SecureRandom RANDOM = new SecureRandom();
+
+    private final ApplicationMapper applicationMapper;
+    private final ApplicationPpidMapper shardMapper;
+    private final PpIdMapper ppidMapper;
+    private final OperationLogMapper operationLogMapper;
+    private final UserMapper userMapper;
+    private final TenantMapper tenantMapper;
+    private final PpIdService ppidService;
+    private final TenantConfigService configService;
+    private final CredentialService credentialService;
+    private final ShardMessageProducer messageProducer;
+    private final TransactionTemplate transactionTemplate;
+
+    public ApplicationServiceImpl(ApplicationMapper applicationMapper, ApplicationPpidMapper shardMapper,
+                                  PpIdMapper ppidMapper, OperationLogMapper operationLogMapper,
+                                  UserMapper userMapper, TenantMapper tenantMapper, PpIdService ppidService,
+                                  TenantConfigService configService, CredentialService credentialService,
+                                  ShardMessageProducer messageProducer, TransactionTemplate transactionTemplate) {
+        this.applicationMapper = applicationMapper;
+        this.shardMapper = shardMapper;
+        this.ppidMapper = ppidMapper;
+        this.operationLogMapper = operationLogMapper;
+        this.userMapper = userMapper;
+        this.tenantMapper = tenantMapper;
+        this.ppidService = ppidService;
+        this.configService = configService;
+        this.credentialService = credentialService;
+        this.messageProducer = messageProducer;
+        this.transactionTemplate = transactionTemplate;
+    }
+
+    @Override
+    public ApplySubmitVo submit(ApplyCreateRequest request) {
+        long tenantId = TenantAccess.requireTenantId();
+        long userId = TenantAccess.requireUserId();
+        String productModel = requireText(request.getProductModel(), "产品型号");
+        String spu = requireText(request.getSpu(), "SPU");
+        Integer requested = request.getApplyQuantity();
+        if (requested == null || requested < 1) {
+            throw new BizException(ErrorCode.INVALID_PARAM, "申请数量至少为 1");
+        }
+        String idempotencyKey = trimToNull(request.getRequestId());
+
+        // 幂等键先读一次：命中就连额度都不碰。允许与并发窗口同时落到这里，
+        // 最终判定在库上的唯一索引，见下面的 DuplicateKeyException 分支。
+        if (idempotencyKey != null) {
+            ApplicationPO hit = findByIdempotencyKey(tenantId, idempotencyKey);
+            if (hit != null) {
+                log.info("申请重复提交，返回已有单: tenantId={}, applicationNo={}", tenantId, hit.getApplicationNo());
+                return toSubmitVo(hit, true);
+            }
+        }
+
+        // 这两道检查必须在扣减之前：证书坏掉的租户、以及超出租户上限的量，都不该先吃掉额度再失败
+        requireUsableCredential(tenantId);
+        requireWithinTenantLimit(tenantId, requested);
+
+        ApplicationPO created;
+        try {
+            created = transactionTemplate.execute(status ->
+                    doApply(tenantId, userId, productModel, spu, requested, idempotencyKey));
+        } catch (DuplicateKeyException e) {
+            ApplicationPO existing = idempotencyKey == null ? null : findByIdempotencyKey(tenantId, idempotencyKey);
+            if (existing == null) {
+                // 不是幂等键撞的（例如单号随机段碰撞），没什么可返回的，照原样抛出
+                throw e;
+            }
+            log.info("并发重复提交已整体回滚: tenantId={}, applicationNo={}", tenantId, existing.getApplicationNo());
+            return toSubmitVo(existing, true);
+        }
+        return toSubmitVo(created, false);
+    }
+
+    /**
+     * 一次事务里做完：拆分 → 落单 → 逐份额度 CAS 扣减 → 落分片 → 留痕 → 登记消息。
+     * 任何一步失败，前面已扣的额度随事务一起回滚，不会留下"扣了量但没有单"的中间态。
+     */
+    private ApplicationPO doApply(long tenantId, long userId, String productModel, String spu,
+                                  int requested, String idempotencyKey) {
+        // 与 GET /api/ppid/available 同一条池查询、同一份贪心，预览与真实分配不会有两套语义
+        List<PpIdPlanVo> plan = ppidService.planAllocation(productModel, spu, requested);
+        int allocatable = plan.stream().mapToInt(PpIdPlanVo::getQuantity).sum();
+        if (allocatable < requested) {
+            throw new BizException(ErrorCode.BIZ_REJECTED, "额度不足：产品型号 " + productModel + " / SPU " + spu
+                    + " 当前可分配 " + allocatable + "，本次需要 " + requested + "，还差 " + (requested - allocatable));
+        }
+
+        String applicant = applicantName(userId);
+        ApplicationPO application = newApplication(tenantId, productModel, spu, requested, plan.size(),
+                applicant, userId, idempotencyKey);
+        applicationMapper.insert(application);
+
+        List<ApplicationPpidPO> shards = new ArrayList<>(plan.size());
+        for (PpIdPlanVo item : plan) {
+            if (ppidMapper.deduct(tenantId, item.getPpidId(), item.getQuantity()) != 1) {
+                // 预览说够、这里扣不动，只可能是这中间被别人抢走了。整单失败让用户重看余量，
+                // 而不是把申请量悄悄砍小——砍小之后用户看到的单量与实际申请的 token 数不一致。
+                throw new BizException(ErrorCode.BIZ_REJECTED, "额度刚被其他申请占用，请刷新余量后重新提交");
+            }
+            ApplicationPpidPO shard = new ApplicationPpidPO();
+            shard.setTenantId(tenantId);
+            shard.setApplicationId(application.getId());
+            shard.setPpid(item.getPpid());
+            shard.setPpidId(item.getPpidId());
+            shard.setAllocateCount(item.getQuantity());
+            shard.setStage(Stage.APPLY.name());
+            shard.setStageStatus(StageStatus.PENDING.name());
+            shards.add(shard);
+        }
+        shardMapper.insertBatch(shards);
+
+        // insertBatch 拿不回自增 ID，消息体要带 shardId，所以按申请单读回一次；一个申请单个位数分片，
+        // 这条查询比把主键回填逻辑手写进 SQL 便宜得多。
+        List<ApplicationPpidPO> persisted = shardMapper.selectByApplication(tenantId, application.getId());
+        writeOperationLog(tenantId, application, applicant, shards.size());
+        messageProducer.publishAfterCommit(persisted.stream()
+                .map(row -> new StageMessage(tenantId, application.getId(), row.getId(), row.getStage(),
+                        application.getApplicationNo()))
+                .toList());
+        log.info("申请已受理: tenantId={}, applicationNo={}, quantity={}, shards={}", tenantId,
+                application.getApplicationNo(), requested, shards.size());
+        return application;
+    }
+
+    // ---- HELPERS ----
+
+    /**
+     * 凭证必须存在且未过期才受理申请。这里不构造客户端、不联网，只看库里的元数据：
+     * 申请量一旦扣掉，等到异步阶段才发现证书坏了，用户看到的是一张注定失败的单。
+     */
+    private void requireUsableCredential(long tenantId) {
+        CredentialVo credential = credentialService.metadata(tenantId);
+        LocalDateTime notAfter = credential.getCertNotAfter();
+        if (notAfter != null && notAfter.isBefore(LocalDateTime.now())) {
+            throw new BizException(ErrorCode.CREDENTIAL_EXPIRED, "租户 MFI 客户端证书已过期，请先更换证书再申请");
+        }
+    }
+
+    /**
+     * 租户级单次上限。0 表示不额外限制，只受池子余量约束——这条规则在 MES 是硬编码常量，改一次要发一次版。
+     */
+    private void requireWithinTenantLimit(long tenantId, int requested) {
+        int max = configService.intValue(tenantId, TenantConfigKey.APPLY_MAX_QUANTITY);
+        if (max > 0 && requested > max) {
+            throw new BizException(ErrorCode.BIZ_REJECTED,
+                    "超出单次申请上限 " + max + "，请分批提交（该上限由租户配置 APPLY_MAX_QUANTITY 决定）");
+        }
+    }
+
+    private ApplicationPO newApplication(long tenantId, String productModel, String spu, int requested,
+                                         int ppidCount, String applicantName, long userId, String idempotencyKey) {
+        ApplicationPO application = new ApplicationPO();
+        application.setTenantId(tenantId);
+        application.setApplicationNo(generateApplicationNo());
+        application.setApplicantUserId(userId);
+        application.setApplicantName(applicantName);
+        application.setProductModel(productModel);
+        application.setSpu(spu);
+        application.setAppleTechnology(appleTechnology(tenantId));
+        application.setApplyQuantity(requested);
+        application.setPpidCount(ppidCount);
+        application.setTokenCount(0);
+        application.setStatus(ApplicationStatus.PENDING.name());
+        application.setIdempotencyKey(idempotencyKey);
+        return application;
+    }
+
+    /**
+     * 单号用"日期 + 随机段"而不是自增号：它出现在 URL、导出文件与厂商沟通里，
+     * 自增号等于把租户数量与其他人的单号一起暴露出去。
+     */
+    private static String generateApplicationNo() {
+        StringBuilder suffix = new StringBuilder(8);
+        for (int i = 0; i < 8; i++) {
+            suffix.append(NO_ALPHABET[RANDOM.nextInt(NO_ALPHABET.length)]);
+        }
+        return "A" + LocalDate.now().format(NO_DATE) + "-" + suffix;
+    }
+
+    /** technology 取发起时的快照；空值落 DEFAULT 哨兵，与客户端工厂注册路径同一个常量 */
+    private String appleTechnology(long tenantId) {
+        TenantPO tenant = tenantMapper.selectById(tenantId);
+        String technology = tenant == null ? null : tenant.getAppleTechnology();
+        return hasText(technology) ? technology.trim() : MfiEndpoints.TECHNOLOGY_DEFAULT;
+    }
+
+    /** 姓名快照。账号被删或查不到时用账号兜底，申请单上不能出现空的发起人 */
+    private String applicantName(long userId) {
+        UserPO user = userMapper.selectById(userId);
+        if (user == null) {
+            return "已注销账号";
+        }
+        return hasText(user.getName()) ? user.getName().trim() : user.getAccount();
+    }
+
+    private ApplicationPO findByIdempotencyKey(long tenantId, String idempotencyKey) {
+        return applicationMapper.selectOne(Wrappers.<ApplicationPO>lambdaQuery()
+                .eq(ApplicationPO::getTenantId, tenantId)
+                .eq(ApplicationPO::getIdempotencyKey, idempotencyKey));
+    }
+
+    /**
+     * 留痕只记动作与数量。分片明细以 t_application_ppid 为准，这里不重复写 PPID 清单，
+     * 否则这张表会被排障脚本整行导出，等于把额度明细抄了一份到日志型表里。
+     */
+    private void writeOperationLog(long tenantId, ApplicationPO application, String applicantName, int shardCount) {
+        OperationLogPO entry = new OperationLogPO();
+        entry.setTenantId(tenantId);
+        entry.setApplicationId(application.getId());
+        entry.setAction(OperationAction.APPLY.name());
+        entry.setOperatorUserId(application.getApplicantUserId());
+        entry.setOperatorName(applicantName);
+        entry.setQuantity(application.getApplyQuantity());
+        entry.setDetail("产品型号 " + application.getProductModel() + " / SPU " + application.getSpu()
+                + "，拆为 " + shardCount + " 份额度");
+        operationLogMapper.insert(entry);
+    }
+
+    @Override
+    public PageResult<ApplicationVo> page(ApplicationPageRequest request) {
+        long tenantId = TenantAccess.requireTenantId();
+        LambdaQueryWrapper<ApplicationPO> filter = Wrappers.<ApplicationPO>lambdaQuery()
+                .eq(ApplicationPO::getTenantId, tenantId)
+                .eq(hasText(request.getApplicationNo()), ApplicationPO::getApplicationNo,
+                        trimToNull(request.getApplicationNo()))
+                .eq(hasText(request.getProductModel()), ApplicationPO::getProductModel,
+                        trimToNull(request.getProductModel()))
+                .eq(hasText(request.getSpu()), ApplicationPO::getSpu, trimToNull(request.getSpu()))
+                .eq(hasText(request.getStatus()), ApplicationPO::getStatus, parseStatus(request.getStatus()))
+                .orderByDesc(ApplicationPO::getId);
+        IPage<ApplicationPO> page = applicationMapper.selectPage(
+                Page.of(request.getPageNum(), request.getPageSize()), filter);
+        return PageResult.of(page, ApplicationServiceImpl::toVo);
+    }
+
+    private static String parseStatus(String raw) {
+        if (!hasText(raw)) {
+            return null;
+        }
+        String value = raw.trim();
+        try {
+            return ApplicationStatus.valueOf(value).name();
+        } catch (IllegalArgumentException e) {
+            throw new BizException(ErrorCode.INVALID_PARAM, "不支持的申请单状态: " + raw);
+        }
+    }
+
+    private ApplySubmitVo toSubmitVo(ApplicationPO application, boolean duplicated) {
+        ApplySubmitVo vo = new ApplySubmitVo();
+        vo.setApplicationNo(application.getApplicationNo());
+        vo.setStatus(application.getStatus());
+        vo.setApplyQuantity(application.getApplyQuantity());
+        vo.setPpidCount(application.getPpidCount());
+        vo.setDuplicated(duplicated);
+        vo.setShards(shardMapper.selectByApplication(application.getTenantId(), application.getId()).stream()
+                .map(ApplicationServiceImpl::toShardVo).toList());
+        return vo;
+    }
+
+    private static ApplicationVo toVo(ApplicationPO row) {
+        ApplicationVo vo = new ApplicationVo();
+        vo.setApplicationNo(row.getApplicationNo());
+        vo.setProductModel(row.getProductModel());
+        vo.setSpu(row.getSpu());
+        vo.setAppleTechnology(row.getAppleTechnology());
+        vo.setApplyQuantity(row.getApplyQuantity());
+        vo.setPpidCount(row.getPpidCount());
+        vo.setTokenCount(row.getTokenCount());
+        vo.setStatus(row.getStatus());
+        vo.setFailReason(row.getFailReason());
+        vo.setApplicantName(row.getApplicantName());
+        vo.setCreateTime(row.getCreateTime());
+        vo.setFinishTime(row.getFinishTime());
+        return vo;
+    }
+
+    private static ApplicationShardVo toShardVo(ApplicationPpidPO row) {
+        ApplicationShardVo vo = new ApplicationShardVo();
+        vo.setShardId(row.getId());
+        vo.setPpid(row.getPpid());
+        vo.setAllocateCount(row.getAllocateCount());
+        vo.setStage(row.getStage());
+        vo.setStageStatus(row.getStageStatus());
+        vo.setRetryCount(row.getRetryCount());
+        vo.setLastError(row.getLastError());
+        return vo;
+    }
+
+    private static String requireText(String value, String label) {
+        String trimmed = trimToNull(value);
+        if (trimmed == null) {
+            throw new BizException(ErrorCode.INVALID_PARAM, label + "不能为空");
+        }
+        return trimmed;
+    }
+
+    private static String trimToNull(String value) {
+        if (value == null) {
+            return null;
+        }
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    private static boolean hasText(String value) {
+        return value != null && !value.isBlank();
+    }
+
+
+
+}

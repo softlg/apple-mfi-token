@@ -6,6 +6,7 @@ import com.galaplat.mfi.model.request.PpIdPageRequest;
 import com.galaplat.mfi.model.request.PpIdUpdateRequest;
 import com.galaplat.mfi.model.vo.PpIdAvailableVo;
 import com.galaplat.mfi.model.vo.PpIdImportResultVo;
+import com.galaplat.mfi.model.vo.PpIdPlanVo;
 import com.galaplat.mfi.model.vo.PpIdStatsVo;
 import com.galaplat.mfi.model.vo.PpIdVo;
 import jakarta.servlet.http.HttpServletResponse;
@@ -45,6 +46,15 @@ public interface PpIdService {
      * 的预判，但它不加锁——真正的判定在申请事务里的条件更新。
      */
     PpIdAvailableVo available(String productModel, String spu, Integer quantity);
+
+    /**
+     * 贪心拆分的实际入口，申请事务用它决定要扣哪几份额度。与 {@link #available} 共用同一条池查询与
+     * 同一个排序，所以预览看到的拆分就是申请会做的拆分——两处各写一套分配顺序，是 MES 里
+     * "预估说够、提交说不够"的来源。
+     *
+     * <p>不加锁、不校验租户规则：判定余量的是随后的条件更新。
+     */
+    List<PpIdPlanVo> planAllocation(String productModel, String spu, int quantity);
 
     PpIdImportResultVo importExcel(MultipartFile file);
 

@@ -191,11 +191,17 @@ public class PpIdServiceImpl implements PpIdService {
         return vo;
     }
 
+    @Override
+    public List<PpIdPlanVo> planAllocation(String productModel, String spu, int quantity) {
+        long tenantId = TenantAccess.requireTenantId();
+        return buildPlan(ppidMapper.selectAllocatable(tenantId, requireText(productModel, "产品型号"),
+                requireText(spu, "SPU")), quantity);
+    }
+
     /**
      * 贪心拆分：余量多的先用、零头留后，拆出的分片数最少。
      */
-    private List<PpIdPlanVo> buildPlan(List<PpIdPO> pool, int requestedQuantity) {
-        List<PpIdPlanVo> plan = new ArrayList<>();
+    private List<PpIdPlanVo> buildPlan(List<PpIdPO> pool, int requestedQuantity) {        List<PpIdPlanVo> plan = new ArrayList<>();
         int need = requestedQuantity;
         for (PpIdPO row : pool) {
             if (need <= 0) {

@@ -210,6 +210,7 @@ t_ppid              id, tenant_id, ppid, spu, product_model,
 t_application       id, tenant_id, application_no(UK), applicant_user_id,
                     applicant_name, product_model, spu, apple_technology,
                     apply_quantity, ppid_count, status, fail_reason,
+                    idempotency_key(UK with tenant_id, 可空), 
                     create_time, finish_time
                     IDX(tenant_id, status, create_time)
 
@@ -302,15 +303,15 @@ PPID、凭证密文、其他租户的数据都会随之落盘，而这类泄露�
 ### 7.1 同步段（一次事务）
 
 ```
-POST /api/applications {ppidAllocationMode, productModel, spu, applyQuantity}
+POST /api/applications {productModel, spu, applyQuantity, requestId?}
  1. 参数校验
- 2. 校验租户凭证存在且未过期（否则快速失败，不做无谓扣减）
- 3. 按 (product_model, spu) + status=可用 查 PPID 池，余量倒序
- 4. 校验 applyQuantity ≤ Σ 余量，且 ≤ 租户规则上限
- 5. 贪心分配 → 逐条 CAS 扣减 remaining_quantity
- 6. 写 t_application + N 条 t_application_ppid(stage=APPLY, status=PENDING)
- 7. 写 t_operation_log
- 8. 事务提交后发 MQ  ← 关键
+ 2. requestId 命中已有单则直接返回那张单（不开事务、不碰额度）
+ 3. 校验租户凭证存在且未过期（否则快速失败，不做无谓扣减）
+ 4. 校验 applyQuantity ≤ 租户规则上限 APPLY_MAX_QUANTITY
+ 5. 按 (product_model, spu) + status=可用 查 PPID 池，余量倒序，贪心拆分并校验 ≤ Σ 余量
+ 6. 插 t_application（幂等键在这里由唯一索引判定）→ 逐条 CAS 扣减 remaining_quantity
+    → N 条 t_application_ppid(stage=APPLY, status=PENDING) → t_operation_log
+ 7. 事务提交后发 MQ  ← 关键；回滚则一条都不发
 ```
 
 `[修正]` MES 在 `@Transactional` 方法内部直接发消息（`TokenApplyServiceImpl:75`），事务回滚时消息已投递，形成"PPID 已回滚、苹果已申请"的幽灵单。新实现用 `TransactionSynchronizationManager.registerSynchronization(afterCommit)` 或 `@TransactionalEventListener(AFTER_COMMIT)` 保证**只在提交成功后发消息**。
@@ -548,7 +549,7 @@ MFI_SERVER_PORT                    # 默认 8090
 | **P1** 用户与租户 **（已完成，本机验收全绿）** | register/login/logout/profile/switch-tenant、成员列表/邀请/启停/移除/转让 owner、`TenantAccess` 两道入口守卫、Argon2id 密码哈希（`spring-security-crypto` + 显式带 BouncyCastle）；收尾追加：**owner 位不再缓存进会话**，`TenantBindingInterceptor` 每请求回库取成员与租户状态，会话只留"当前租户 ID"这一选择偏好；`BizException` 按错误码分流 HTTP（NOT_OWNER→403、UNAUTHORIZED/BAD_CREDENTIALS→401、其余→400）；`TenantMemberMapper` 只保留 `selectByUserId`/`selectByTenantAndUser` 两条按 user_id 自缚的放行查询 | **已验证**（对真实 MySQL + Redis 跑 33 项断言，0 失败）：4 租户 8 账号下各租户成员列表互不可见；A 拿乙租户成员 ID 做删除被当作"不存在"拒掉且乙租户数据无变化；C 在甲/乙之间切换后 `/api/members` 结果随上下文变化；非 owner 移除成员与转让 owner 返回 HTTP 403 + `A0403`；成员被停用后原会话立刻拿不到租户上下文（`A0410`），重新启用即恢复；转让 owner 后操作人下一次请求即失去权限、目标成员立刻获得，该租户仍恰好 1 个 owner（库内 `having owners<>1` 零行）；账号不存在与密码错误返回同码同文案；`t_user.password_hash` 全为 `$argon2id$v` 前缀；Redis 实测 `mfi-token:login:session:<userId>` 的 `dataMap` 仅含 `currentTenantId`，令牌为 uuid 且不含 JWT 结构；SQL 日志实测业务表带 `deleted = 0 AND tenant_id = N`、放行查询不带 tenant_id、`insert` 由拦截器补 `tenant_id` | 1d |
 | **P2** 凭证与客户端 **（已完成，本机验收 48/48）** | AES-256-GCM 加解密（AAD 绑 `tenant_id` + 字段名）、密钥环与 `encrypt_key_id` 轮换位、`MfiSslContextBuilder`（PKCS#8/PKCS#1 双格式 + 私钥/证书配对预检）、`MfiClientFactory`（Caffeine，512 租户上限 + 30 分钟 `expireAfterAccess` 兼作明文私钥驻留上限）、`MfiTokenClient` 9 接口、`MfiProbeService` 连通性自检、`TenantProfileService`/`TenantConfigService` 与 owner 守卫的 `TenantController`/`TenantCredentialController`；**自签联调材料**：`scripts/gen-dev-certs.sh`（CA + 服务端 + PKCS#8/PKCS#1 两套租户证书 + 一张过期证书，写到 gitignored 的 `.dev-certs/`）、`scripts/MfiStubServer.java`（JDK 单文件源码启动的 two-way TLS 桩，`needClientAuth`）、`scripts/verify-p2.py`（活体验收脚本） | **已验证**：`mvn test` 36/36（apple 12 含 4 个**真实 mTLS 握手**：PKCS#8 与 PKCS#1 各自握手成功且桩侧读到客户端证书 DN、他签 CA 的客户端被拒且请求数为 0、不受信服务端被拒；8 个 `MfiSslContextBuilder` 断言含"A 证书 + B 私钥"配对检测为 false；15 个 service 断言含跨租户 AAD 替换解密失败、轮换后 v0 历史密文仍可解、密钥环空/未知 activeKeyId/非 Base64/16 字节全部启动期拒绝）；对真实 MySQL + Redis + 本地 mTLS 桩跑 **48 项活体断言，0 失败**：垃圾 PEM/不配对/过期证书三道校验（过期给 `B0410`）、PKCS#1 链式材料入库、`verify` 返回 `reachable=true, httpStatus=200` 且桩侧日志出现 `clientCert=CN=MFI Tenant B Client`、库内 `cert_cipher`/`key_cipher` 无 `BEGIN` 标记且互不相同、`encrypt_key_id=v1` 与指纹一致、应用日志私钥文本增量 0、**两次自检只装配 1 次客户端**（命中缓存）、替换凭证后重新装配 +1 且桩侧看到新证书主体、跨租户读不到凭证（`B0404`）、非 owner 改凭证与改业务参数均 HTTP 403 + `A0403`、删除凭证后自检给业务错误而非 500；`.gitignore` 补 `*.crt`/`.dev-certs/`/`__pycache__/` 并实测 `git check-ignore` 命中 | 1d |
 | **P3** PPID 池 **（已完成，本机验收 59/59）** | `PpIdMapper` 的 CAS 条件扣减/回补 SQL、`PpIdService`（分页 CRUD、停用作废、按型号+SPU 的余量预估）、Excel 导入/模板/导出（EasyExcel 4.0.3，列序即契约）、`/api/ppid` 9 个端点、`PageResult` 统一分页响应、`MaxUploadSizeExceededException` 全局处理；**测试资产**：`PpIdServiceTest`（12 项，含 `MockMultipartFile` + EasyExcel 真实读写往返）、`PpIdDeductConcurrencyTest`（对真实 MySQL 的并发 CAS，`MFI_IT_DB=1` 才启用）、`scripts/verify-p3.py`（活体验收） | **已验证**：`mvn -o -pl mfi-service -am test` 48/48（apple 12 + dao 9 + service 27，其中新增 12 项覆盖贪心拆分预估、`total<applied` 拒绝、"启用但余量为 0"拒绝、人工改总量必带 `applied_quantity` 快照条件、停用绝不 `deleteById`、导入行号/分块 500/`"100.0"` 放行/重导报"已存在"）；`MFI_IT_DB=1 mvn -o -pl mfi-dao -am test` 12/12，其中 3 项打真实 MySQL：**50 线程各扣 1 打到 40 份额度恰好 40 成功**、`applied=40 remaining=0` 且自动停用、余量 3 扣 5 不改一行、SQL 手工把停用行改回启用后再扣仍 0 影响；活体 59/59（真实 MySQL + Redis）：模板列序与 RFC 5987 文件名、重复 PPID+SPU 拒绝、分页四类筛选、预估与库内实际一致、非法文件逐行报错 `[3,4,5,6]` 且 `insertedRows=0`、1200 行整份入库后 stats 对齐、导出中文状态、**跨租户 8 项**（B 查不到/改不动/停不掉 A 的行、同 PPID+SPU 在 B 可独立导入、B 导出只含自己）、openapi 不泄漏库列名；`grep -ac 'P3-IMP' 运行日志` = 0 | 1d |
-| **P4** 申请同步段 | 分配算法（型号+SPU 贪心）、事务、AFTER_COMMIT 发消息、`t_application`/`t_application_ppid` 落库、余量接口 | 事务回滚时消息未发出；多 PPID 拆分正确；回滚后余量恢复；重复提交不重复扣减 | 1d |
+| **P4** 申请同步段 **（已完成，本机验收 42/42）** | `ApplicationPO`/`ApplicationPpidPO`/`OperationLogPO` 与三个 Mapper、Flyway `V2__application_idempotency.sql`、`ApplicationService.submit`（一次事务内：凭证与上限前置 → 贪心拆分 → 逐份额度 CAS 扣减 → 落单落分片 → 留痕 → 登记消息）、`ShardMessageProducer`（AFTER_COMMIT 投递）、`RabbitTopology`（`mfi.token.normal` + `mfi.apply.queue` + JSON 转换器）、`POST /api/applications` 与 `GET /api/applications/page`；`PpIdService.planAllocation` 让预览与实际分配共用同一条池查询 | **已验证**：`mvn -o -pl mfi-service -am test` 57/57（新增 `ApplicationServiceImplTest` 9 项：**提交前一条消息都不许离开进程**、触发提交后回调才发且只发分片数那么多条、抢不到额度时不登记任何提交后回调、额度不足先拒后扣、上限闸门在池查询之前、证书过期快速失败、同 requestId 命中已有单且不开事务、唯一键撞库回滚后返回对手的单、脱离事务登记消息直接失败）；活体 42/42（真实 MySQL + Redis + RabbitMQ）：120 份在 100+30 的池上拆成 `[100,20]`、扣满的那份额度**余量归零自动停用**、库里分片 2 行合计 120、发起人/technology 快照落库、留痕只记数量不含 PPID 清单、**队列 `mfi.apply.queue` 实测正好多出 2 条**（rabbitmqctl 对账）、重复提交返回同一单号且 `applied_quantity` 不变、不带 requestId 的两次提交是两个单（NULL 不受唯一约束）、上限 3 挡掉 4 且额度分文未动、**两线程抢最后 1 份恰好成一个**且输家库里无单无扣减、跨租户 4 项、非法状态给 `A0400` 而不是 500、openapi 不泄漏 `idempotency_key`；运行日志 `grep -ac 'Preparing\|P4-BIG\|PRIVATE KEY'` 全为 0 | 1d |
 | **P5** 异步流水线 | 两 exchange + 6 queue + DLX、5 监听器、延迟计算、CAS 幂等、重试与 DLQ、租户并发闸门、兜底扫描；**自签 CA 要求的 two-way TLS WireMock 桩** | 阶段跃迁/CAS/幂等/延迟计算必须有测试覆盖。**broker 接线（TTL 回流、DLQ、并发闸门）本机已具备验证条件**：RabbitMQ 3.13.7 + OTP 26.2.5.5 已在 D 盘跑起（§10、§13.3） | 2d |
 | **P6** 结果与导出 | token 落库、SN 生成、状态聚合、异步导出任务、进度时间线查询、人工重放、销毁 | 时间线显示 5 阶段真实状态；导出 1 万条不 OOM；重放只作用于失败分片 | 1d |
 | **P7** 前端 | 8 个页面 + 租户切换器 + owner 可见性 + 进度时间线组件 | 浏览器实测完整链路：注册→上传证书→导入 PPID→申请→进度→导出 | 2d |
@@ -595,6 +596,38 @@ MFI_SERVER_PORT                    # 默认 8090
     6 个键（含 `APPLY_MAX_QUANTITY`）的读写、留空回落默认值与 owner 守卫做完，P3 再实现一遍只会造成两套语义。
     真正的缺口是**执行点**：`APPLY_MAX_QUANTITY` 目前只是存着，没人读它拦申请。这属于申请事务的一部分，落到 P4 与
     `deduct` 同一事务内生效，避免"预估放行、提交后才发现超限"。
+
+### P4 编码期偏离与取舍
+
+1. **加了一列幂等键（唯一的 schema 改动）**：`V2__application_idempotency.sql` 给 `t_application` 加
+   `idempotency_key` 与 `uk_application_idempotency(tenant_id, idempotency_key)`。MES 的重复提交靠"前端别连点"，
+   超时重试就会重复扣额度并生成两张单。做法是客户端每次表单提交带一个 `requestId`：撞唯一键时整个申请事务
+   （连同已做的扣减）回滚，服务按同一把键读回先赢的那张单返回。MySQL 唯一索引不约束 NULL，所以不传键的调用
+   行为不变。单号 `application_no` 改成 `AyyMMdd-8位随机`（字符集去掉易混字符）而不是自增号：它会出现在 URL、
+   导出文件与厂商沟通里，自增号等于把租户量级和别人的单号一起发出去。
+2. **`ppidAllocationMode` 没有做**：§7.1 的入参里列了这个字段。只支持"按 型号+SPU 余量倒序贪心"一种分配，
+   人工指定 PPID 会把超卖判定从数据库的条件更新挪回应用层的读后写，MES 那 11 个补偿端点就是这么攒出来的。
+   真有厂商需要指定额度时，再加一个"候选白名单"过滤条件，而不是另一套分配实现。
+3. **消息在事务提交后投递失败只记 ERROR，不回滚也不报错**：此刻申请单已经生效（额度已扣、单已落库），
+   把 500 甩给用户只会诱导他再点一次。分片仍是 `PENDING`，由 P5 的兜底扫描按 `next_execute_time` 补发。
+   这条取舍要求 P5 的扫描必须真的实现，否则就是静默丢单。
+4. **AFTER_COMMIT 用 `TransactionSynchronizationManager` 而不是 `@TransactionalEventListener`**：申请服务用的是
+   `TransactionTemplate`（编程式事务）——为了能在事务**外**捕获 `DuplicateKeyException` 再回读对手的单，
+   `@Transactional` 注解的自调用代理在这里不好摆。同步回调与事件监听器语义等价，且单测可以直接触发 `afterCommit()`
+   来证明"回滚不发消息"，不需要起一个真事务管理器。`publishAfterCommit` 在没有活动事务时**直接抛
+   `IllegalStateException`**：降级为"立即发送"就复刻了 MES 的幽灵申请形状。
+5. **分片 ID 靠事务内回读**：`insertBatch` 是多值插入，拿不回自增主键，而消息体必须带 `shardId`。
+   单张申请的分片是个位数，多一条按 `application_id` 的查询比手写主键回填便宜。P5 若把分片数放大要重新评估。
+6. **检查顺序是硬约束**，改动前要留意：幂等预查 → 凭证存在且未过期 → 租户单次上限 →（进事务）拆分预估 →
+   **先插申请单**再逐条 `deduct` → 落分片 → 留痕 → 登记消息。插单先于扣减，重复提交那条路径连额度都不碰；
+   凭证检查先于扣减，证书坏掉的租户不会先吃额度再失败。
+7. **消息体只带 ID 是类型层面的约束**：`StageMessage` 是 `record(tenantId, applicationId, shardId, stage, traceId)`，
+   结构里就没有 PPID、数量的位置，将来想泄露得先改这个类型。`traceId` 直接用申请单号，同步段与五个阶段的日志能串起来。
+   队列侧对账用 `rabbitmqctl list_queues`（免安装 RabbitMQ 的 ctl 脚本要 `ERLANG_HOME` + `erts-*/bin` 在 PATH 里，
+   即 §10 第 3 个坑的同一把锁）。
+8. **拓扑只声明用得上的部分**：P4 只建 `mfi.token.normal` 与 `mfi.apply.queue`，后四个阶段的队列、延迟队列与 DLX 留给 P5，
+   避免声明一堆没人消费也没人测试的绑定。消息转换器用 `Jackson2JsonMessageConverter`（不用 JDK 序列化，否则消费端
+   类结构一变，broker 里的旧消息就读不出来）。
 
 ### 最终验收清单
 
@@ -685,9 +718,10 @@ P5 的应对（已由用户选定）：
 
 ## 14. 下一步
 
-P0、P1、P2、P3 已交付并本机验收（§11）。P3 把账本这一层做实了：`t_ppid` 的三量（total/applied/remaining）只由
-`deduct`/`restore` 两条 CAS SQL 改动，人工改总量必带 `applied_quantity` 快照条件，余量归零自动停用，且 50 线程并发实测不超卖。
-接下来进入 **P4 申请同步段**：一次事务内完成 `APPLY_MAX_QUANTITY` 闸门 → 按型号+SPU 的贪心分配 → `deduct` →
-`t_application`/`t_application_ppid` 落库，`AFTER_COMMIT` 才发消息——P3 留下的执行点（超限拦截）就在这里补上，
-而 P3 的拆分预估与 `deduct` 语义已经被测试钉死，P4 只需把它们串起来，不再改动 PPID 层的 SQL。P5 再把 §13.2 的本地 mTLS 桩接进五阶段流水线。
+P0、P1、P2、P3、P4 已交付并本机验收（§11）。P4 把申请链路的同步段收口：一次事务里完成前置校验、贪心拆分、
+CAS 扣减与落单，消息只在提交后离开进程，重复提交由 `uk_application_idempotency` 兜住——并发抢最后 1 份额度
+实测恰好一个赢家、输家库里既无单也无扣减。接下来进入 **P5 异步流水线**：在 `mfi.token.normal` 上补齐后四个阶段的
+队列与 TTL→DLX 延迟回流、五个监听器、CAS 阶段跃迁与幂等 ACK、重试上限与 DLQ、租户并发闸门，以及**兜底扫描**
+（P4 的取舍是"提交后投递失败只记 ERROR"，必须由这里的扫描补发才成立）。P5 还要把 §13.2 的本地 mTLS 桩接进来，
+让五个阶段在自签证书下真的跑通一次。
 编码过程中的偏离会在本文档同步更新。
