@@ -1,5 +1,7 @@
 package com.galaplat.mfi.mq;
 
+import com.galaplat.mfi.common.enums.Stage;
+
 /**
  * 阶段推进消息。
  *
@@ -13,5 +15,13 @@ package com.galaplat.mfi.mq;
  * @param traceId       一次受理的跟踪号，用于把同步段与五个阶段的日志串起来
  */
 public record StageMessage(long tenantId, long applicationId, long shardId, String stage, String traceId) {
+
+    /**
+     * 阶段名换成枚举：队列与延迟档位都按阶段决定，非法阶段名必须在投递前炸掉，
+     * 不能让分片停在一个没人认识的阶段上反复投递失败。
+     */
+    public Stage stageEnum() {
+        return Stage.valueOf(stage);
+    }
 
 }

@@ -3,6 +3,7 @@ package com.galaplat.mfi.service.application;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import com.galaplat.mfi.common.exception.BizException;
+import com.galaplat.mfi.config.PipelineProperties;
 import com.galaplat.mfi.credential.CredentialService;
 import com.galaplat.mfi.dao.entity.ApplicationPO;
 import com.galaplat.mfi.dao.entity.ApplicationPpidPO;
@@ -20,6 +21,7 @@ import com.galaplat.mfi.model.request.ApplyCreateRequest;
 import com.galaplat.mfi.model.vo.ApplySubmitVo;
 import com.galaplat.mfi.model.vo.CredentialVo;
 import com.galaplat.mfi.model.vo.PpIdPlanVo;
+import com.galaplat.mfi.mq.PipelineNames;
 import com.galaplat.mfi.mq.RabbitTopology;
 import com.galaplat.mfi.mq.ShardMessageProducer;
 import com.galaplat.mfi.mq.StageMessage;
@@ -36,6 +38,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.springframework.amqp.core.MessagePostProcessor;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.transaction.support.TransactionSynchronization;
@@ -104,7 +107,7 @@ class ApplicationServiceImplTest {
         TableInfoHelper.initTableInfo(new MapperBuilderAssistant(new MybatisConfiguration(), ""), ApplicationPO.class);
         TenantContext.bind(new TenantPrincipal(TENANT_ID, USER_ID, true));
 
-        producer = new ShardMessageProducer(rabbitTemplate);
+        producer = new ShardMessageProducer(rabbitTemplate, new PipelineNames(new PipelineProperties()));
         service = new ApplicationServiceImpl(applicationMapper, shardMapper, ppidMapper, operationLogMapper,
                 userMapper, tenantMapper, ppidService, configService, credentialService, producer, transactionTemplate);
 
@@ -152,13 +155,14 @@ class ApplicationServiceImplTest {
         verify(shardMapper).insertBatch(anyList());
 
         // 关键断言：受理成功不等于可以开工。此刻一条消息都不该离开进程
-        verify(rabbitTemplate, never()).convertAndSend(any(String.class), any(String.class), any(Object.class));
+        verify(rabbitTemplate, never()).convertAndSend(any(String.class), any(String.class), any(Object.class),
+                any(MessagePostProcessor.class));
 
         commit();
 
         ArgumentCaptor<Object> payloads = ArgumentCaptor.forClass(Object.class);
         verify(rabbitTemplate, times(2)).convertAndSend(eq(RabbitTopology.EXCHANGE_NORMAL),
-                eq(RabbitTopology.QUEUE_APPLY), payloads.capture());
+                eq(RabbitTopology.QUEUE_APPLY), payloads.capture(), any(MessagePostProcessor.class));
         List<Long> shardIds = payloads.getAllValues().stream().map(m -> ((StageMessage) m).shardId()).toList();
         assertEquals(List.of(901L, 902L), shardIds);
         // 消息体只带 ID：单号做跟踪号，PPID 与数量留在库里
@@ -177,7 +181,8 @@ class ApplicationServiceImplTest {
         // 抢不到额度就没登记过任何提交后回调，后面再怎么 commit 也不会发出消息
         assertTrue(TransactionSynchronizationManager.getSynchronizations().isEmpty());
         verify(shardMapper, never()).insertBatch(anyList());
-        verify(rabbitTemplate, never()).convertAndSend(any(String.class), any(String.class), any(Object.class));
+        verify(rabbitTemplate, never()).convertAndSend(any(String.class), any(String.class), any(Object.class),
+                any(MessagePostProcessor.class));
     }
 
     @Test
@@ -266,7 +271,8 @@ class ApplicationServiceImplTest {
 
         assertThrows(IllegalStateException.class, () -> producer.publishAfterCommit(
                 List.of(new StageMessage(TENANT_ID, 1L, 2L, "APPLY", "trace"))));
-        verify(rabbitTemplate, never()).convertAndSend(any(String.class), any(String.class), any(Object.class));
+        verify(rabbitTemplate, never()).convertAndSend(any(String.class), any(String.class), any(Object.class),
+                any(MessagePostProcessor.class));
     }
 
     @Test

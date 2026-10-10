@@ -104,6 +104,18 @@ mfi:
   apple:
     # 本地 mTLS 桩/自建代理的额外信任锚；留空即用 JDK 默认信任库访问真实苹果端点
     trusted-ca-pem: ${MFI_APPLE_TRUSTED_CA_PEM:}
+  pipeline:
+    # 延迟档位（毫秒，升序）。每个档位是一段独立队列，队列级 TTL 固定，所以同一队列内队头即最早到期。
+    # 改动这里等于改队列名：滚动升级时旧队列里还有消息，必须先停生产、清干净再改。
+    delay-tiers: [60000, 300000, 1800000, 3600000]
+    scan-interval-millis: 30000
+    # 只补发 next_execute_time 早于"现在 - 该秒数"的分片，给正在飞的正常消息留出时间
+    scan-grace-seconds: 90
+    scan-batch-size: 200
+    # 超过这个时间还停在 PROCESSING 的分片判定为"消费者已经不在了"，复位成 PENDING
+    processing-timeout-minutes: 30
+    # 租户并发额度占不到时的重排间隔，这段等待不消耗重试次数
+    gate-retry-millis: 30000
 
 springdoc:
   api-docs:

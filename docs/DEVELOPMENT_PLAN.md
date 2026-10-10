@@ -550,7 +550,7 @@ MFI_SERVER_PORT                    # 默认 8090
 | **P2** 凭证与客户端 **（已完成，本机验收 48/48）** | AES-256-GCM 加解密（AAD 绑 `tenant_id` + 字段名）、密钥环与 `encrypt_key_id` 轮换位、`MfiSslContextBuilder`（PKCS#8/PKCS#1 双格式 + 私钥/证书配对预检）、`MfiClientFactory`（Caffeine，512 租户上限 + 30 分钟 `expireAfterAccess` 兼作明文私钥驻留上限）、`MfiTokenClient` 9 接口、`MfiProbeService` 连通性自检、`TenantProfileService`/`TenantConfigService` 与 owner 守卫的 `TenantController`/`TenantCredentialController`；**自签联调材料**：`scripts/gen-dev-certs.sh`（CA + 服务端 + PKCS#8/PKCS#1 两套租户证书 + 一张过期证书，写到 gitignored 的 `.dev-certs/`）、`scripts/MfiStubServer.java`（JDK 单文件源码启动的 two-way TLS 桩，`needClientAuth`）、`scripts/verify-p2.py`（活体验收脚本） | **已验证**：`mvn test` 36/36（apple 12 含 4 个**真实 mTLS 握手**：PKCS#8 与 PKCS#1 各自握手成功且桩侧读到客户端证书 DN、他签 CA 的客户端被拒且请求数为 0、不受信服务端被拒；8 个 `MfiSslContextBuilder` 断言含"A 证书 + B 私钥"配对检测为 false；15 个 service 断言含跨租户 AAD 替换解密失败、轮换后 v0 历史密文仍可解、密钥环空/未知 activeKeyId/非 Base64/16 字节全部启动期拒绝）；对真实 MySQL + Redis + 本地 mTLS 桩跑 **48 项活体断言，0 失败**：垃圾 PEM/不配对/过期证书三道校验（过期给 `B0410`）、PKCS#1 链式材料入库、`verify` 返回 `reachable=true, httpStatus=200` 且桩侧日志出现 `clientCert=CN=MFI Tenant B Client`、库内 `cert_cipher`/`key_cipher` 无 `BEGIN` 标记且互不相同、`encrypt_key_id=v1` 与指纹一致、应用日志私钥文本增量 0、**两次自检只装配 1 次客户端**（命中缓存）、替换凭证后重新装配 +1 且桩侧看到新证书主体、跨租户读不到凭证（`B0404`）、非 owner 改凭证与改业务参数均 HTTP 403 + `A0403`、删除凭证后自检给业务错误而非 500；`.gitignore` 补 `*.crt`/`.dev-certs/`/`__pycache__/` 并实测 `git check-ignore` 命中 | 1d |
 | **P3** PPID 池 **（已完成，本机验收 59/59）** | `PpIdMapper` 的 CAS 条件扣减/回补 SQL、`PpIdService`（分页 CRUD、停用作废、按型号+SPU 的余量预估）、Excel 导入/模板/导出（EasyExcel 4.0.3，列序即契约）、`/api/ppid` 9 个端点、`PageResult` 统一分页响应、`MaxUploadSizeExceededException` 全局处理；**测试资产**：`PpIdServiceTest`（12 项，含 `MockMultipartFile` + EasyExcel 真实读写往返）、`PpIdDeductConcurrencyTest`（对真实 MySQL 的并发 CAS，`MFI_IT_DB=1` 才启用）、`scripts/verify-p3.py`（活体验收） | **已验证**：`mvn -o -pl mfi-service -am test` 48/48（apple 12 + dao 9 + service 27，其中新增 12 项覆盖贪心拆分预估、`total<applied` 拒绝、"启用但余量为 0"拒绝、人工改总量必带 `applied_quantity` 快照条件、停用绝不 `deleteById`、导入行号/分块 500/`"100.0"` 放行/重导报"已存在"）；`MFI_IT_DB=1 mvn -o -pl mfi-dao -am test` 12/12，其中 3 项打真实 MySQL：**50 线程各扣 1 打到 40 份额度恰好 40 成功**、`applied=40 remaining=0` 且自动停用、余量 3 扣 5 不改一行、SQL 手工把停用行改回启用后再扣仍 0 影响；活体 59/59（真实 MySQL + Redis）：模板列序与 RFC 5987 文件名、重复 PPID+SPU 拒绝、分页四类筛选、预估与库内实际一致、非法文件逐行报错 `[3,4,5,6]` 且 `insertedRows=0`、1200 行整份入库后 stats 对齐、导出中文状态、**跨租户 8 项**（B 查不到/改不动/停不掉 A 的行、同 PPID+SPU 在 B 可独立导入、B 导出只含自己）、openapi 不泄漏库列名；`grep -ac 'P3-IMP' 运行日志` = 0 | 1d |
 | **P4** 申请同步段 **（已完成，本机验收 42/42）** | `ApplicationPO`/`ApplicationPpidPO`/`OperationLogPO` 与三个 Mapper、Flyway `V2__application_idempotency.sql`、`ApplicationService.submit`（一次事务内：凭证与上限前置 → 贪心拆分 → 逐份额度 CAS 扣减 → 落单落分片 → 留痕 → 登记消息）、`ShardMessageProducer`（AFTER_COMMIT 投递）、`RabbitTopology`（`mfi.token.normal` + `mfi.apply.queue` + JSON 转换器）、`POST /api/applications` 与 `GET /api/applications/page`；`PpIdService.planAllocation` 让预览与实际分配共用同一条池查询 | **已验证**：`mvn -o -pl mfi-service -am test` 57/57（新增 `ApplicationServiceImplTest` 9 项：**提交前一条消息都不许离开进程**、触发提交后回调才发且只发分片数那么多条、抢不到额度时不登记任何提交后回调、额度不足先拒后扣、上限闸门在池查询之前、证书过期快速失败、同 requestId 命中已有单且不开事务、唯一键撞库回滚后返回对手的单、脱离事务登记消息直接失败）；活体 42/42（真实 MySQL + Redis + RabbitMQ）：120 份在 100+30 的池上拆成 `[100,20]`、扣满的那份额度**余量归零自动停用**、库里分片 2 行合计 120、发起人/technology 快照落库、留痕只记数量不含 PPID 清单、**队列 `mfi.apply.queue` 实测正好多出 2 条**（rabbitmqctl 对账）、重复提交返回同一单号且 `applied_quantity` 不变、不带 requestId 的两次提交是两个单（NULL 不受唯一约束）、上限 3 挡掉 4 且额度分文未动、**两线程抢最后 1 份恰好成一个**且输家库里无单无扣减、跨租户 4 项、非法状态给 `A0400` 而不是 500、openapi 不泄漏 `idempotency_key`；运行日志 `grep -ac 'Preparing\|P4-BIG\|PRIVATE KEY'` 全为 0 | 1d |
-| **P5** 异步流水线 | 两 exchange + 6 queue + DLX、5 监听器、延迟计算、CAS 幂等、重试与 DLQ、租户并发闸门、兜底扫描；**自签 CA 要求的 two-way TLS WireMock 桩** | 阶段跃迁/CAS/幂等/延迟计算必须有测试覆盖。**broker 接线（TTL 回流、DLQ、并发闸门）本机已具备验证条件**：RabbitMQ 3.13.7 + OTP 26.2.5.5 已在 D 盘跑起（§10、§13.3） | 2d |
+| **P5** 异步流水线 **（已完成，本机验收 54/54）** | `RabbitTopology`（`mfi.token.normal` + `mfi.token.delay` 两个 direct exchange、5 个阶段队列 + 1 个 DLQ、按 `delayTiers` 逐档位声明"队列级 TTL + 死信回流到本阶段队列"的延迟队列）、`PipelineNames`（档位毫秒数 ↔ 队列名互转，取整到不小于它的档位）、`StageRunner`（claim CAS → 回库读 → 早到重排 → 租户闸门 → 处理器 → 跃迁，先落库后投递）、`StageOutcome` 四态、5 个阶段处理器与 1 个 `PipelineListener`（5 个 `@RabbitListener`）、`MfiUtcTime`（苹果 UTC 时刻 + 1 分钟安全余量、解析失败回落 1h）、`TenantConcurrencyGate`、`ApplicationAggregator`（单条条件 UPDATE，终态不被迟到的聚合改回 RUNNING）、`PipelineScanner`（PROCESSING 超时复位 + PENDING 到点补发）、`DeadLetterListener`；**fixture 扩展**：`scripts/MfiStubServer.java` 增加五条剧情（正常/`WAIT`+`retry_download_after`/两小时后到货/403 永久拒/503 可恢复）与逐文件切片，`scripts/verify-p5.py`（54 项活体断言） | **已验证**：`mvn -o -pl mfi-service -am test` 全绿（apple 17 + dao 12（3 项真实库并发 IT 无 `MFI_IT_DB` 时跳过）+ service 94），其中 `StageRunnerTest` 16 项盯三条会直接造成重复调苹果/丢进度/耗死分片的规则（**领取返回 0 时回库读、闸门、处理器一条都不走到**、跃迁落库成功才投下一跳、等待原样回传 `retryCount` 而 RETRY 才 +1、早于计划时间重排、重试耗尽落 DEAD 并投死信），`PipelineNamesTest` 8 项（档位取整、非法档位、队列名稳定性），`PipelineScannerTest` 5 项（复位不加重试、补发只到点、跨租户），5 个处理器测试 29 项；**对真实 MySQL + Redis + RabbitMQ + 自签 CA 的 two-way TLS 桩跑 54 项活体断言，0 失败**（桩用 JDK `HttpsServer` 手写而不是计划里写的 WireMock，两-way TLS 与剧情都要自己控，200 行内可 review，且不必为 fixture 再引一套 Jetty）：7 个 token 走完 APPLY→FILE_NAME→FILE_CONTENT→REGISTER→FINISH 且桩给的 request id 落库、**逐文件推进**（两个文件各登记一次且 `token_count` 合计 7）、配件 UUID 逐行唯一（重试不换 uuid）、苹果 CRC32 原样落库、列序解析（Token ID 与 token 原文各归其列、base64 解出内容一致）、留痕 5 条前进记录且**不含 token 原文与 Token ID**、`retry_download_after` 到货前 PENDING + `next_execute_time` 在未来且 `retry_count=0`、`rabbitmqctl` 实测消息躺在 `mfi.delay.name.*` 档位队列里（TTL+死信回流闭环）、等待中的申请单读侧显示 RUNNING、桩侧对同一 PPID 只回一次"还在生成"、超过最长档位到货后重排且不消耗重试且时刻不倒退、**把分片伪造成 PROCESSING 后兜底扫描复位**且不加重试、在飞消息到货被 CAS 挡下（日志"判定为重复投递或已被推进"且分片没被改坏）、403 直接 DEAD 且只调苹果一次 + 死信被记成需要人工介入 + 全分片失败聚合 FAILED、503 按 10s/30s/1m 退避且总调用次数正好等于上限 3、**五个阶段队列与 DLQ 收口时全部 0 积压**、运行日志 `grep` 不到 token 原文/Token ID/`PRIVATE KEY`；本轮补掉一处真实缺陷（申请单在等待期间一直显示 PENDING，见下方第 7 条），并修掉 fixture 的 Token ID 复用问题（第 10 条） | 2d |
 | **P6** 结果与导出 | token 落库、SN 生成、状态聚合、异步导出任务、进度时间线查询、人工重放、销毁 | 时间线显示 5 阶段真实状态；导出 1 万条不 OOM；重放只作用于失败分片 | 1d |
 | **P7** 前端 | 8 个页面 + 租户切换器 + owner 可见性 + 进度时间线组件 | 浏览器实测完整链路：注册→上传证书→导入 PPID→申请→进度→导出 | 2d |
 | **P8a** 本地安全验收 | `docs/mfi-token-flow.md`、日志脱敏复查、跨租户渗透自测、部署说明、§11 最终验收清单逐项 | 除"真证书联调"外的全部验收项通过 | 1d |
@@ -628,6 +628,55 @@ MFI_SERVER_PORT                    # 默认 8090
 8. **拓扑只声明用得上的部分**：P4 只建 `mfi.token.normal` 与 `mfi.apply.queue`，后四个阶段的队列、延迟队列与 DLX 留给 P5，
    避免声明一堆没人消费也没人测试的绑定。消息转换器用 `Jackson2JsonMessageConverter`（不用 JDK 序列化，否则消费端
    类结构一变，broker 里的旧消息就读不出来）。
+
+### P5 编码期偏离与取舍
+
+1. **状态机只留在 `StageRunner`，处理器只回答"这次怎么样"**：`StageOutcome` 只有 ADVANCE/WAIT/RETRY/DEAD 四种，
+   五个处理器不写跃迁、不碰重试计数、不投消息。MES 那五个监听器各自 `updateStatus` 再各自 `sendToDelay`，
+   正是"重试 2 次后静默失败"与"有分片失败但单据显示成功"的共同来源；跃迁的正确性（CAS 前态、重试计数、投递时机）
+   集中一处才能被测一处，所以 `StageRunnerTest` 是本轮最重的一组测试。
+2. **消费顺序是硬约束**：`claim`(CAS) → 回库读分片与申请单 → 早到检查 → 租户闸门 → 处理器 → 跃迁。
+   `claim` 返回 0 就是唯一的去重点，之后的回库读、闸门、处理器一条都不许走到——重复投递若在闸门处才被发现，
+   APPLY 阶段已经多调了一次苹果。
+3. **等待不算失败重试**：`hold()` 把 `retryCount` 原样传回，只有 RETRY 才 +1。苹果的 `retry_download_after`
+   是小时级，若等待消耗重试，一次大文件申请会在几个小时内被自己的等待耗进死信队列。
+4. **超过最长档位时不猜时间**：延迟靠"队列级 TTL + 死信回流"，档位是固定的几条队列（1m/5m/30m/1h），
+   不能为"两小时四十分"临时造队列。做法是让消息按最长档位到货，`StageRunner` 再比对 `next_execute_time`：
+   仍早于计划（容差 60s，抵消时钟与排队抖动）就按原计划重排一次。代价是最多每档位一次空转往返，
+   收益是绝不提前调苹果，也保住"同一 TTL 队列里队头即最早到期"这条前提。
+5. **先落库再投递，跃迁影响 0 行就不投**：`advance`/`schedule`/`markDead` 都是带前态条件的单条 UPDATE，
+   返回 0 说明被兜底扫描或另一条消息抢先，本跳放弃。反序会在落库失败时留下没人认领的消息。
+   `retry_count` 与 `next_execute_time` 由同一条 UPDATE 写，避免"计数加了、时间没加"的半次跃迁。
+6. **兜底扫描干两件事且都不判失败**：PROCESSING 超过 `processing-timeout-minutes` 复位成 PENDING（消费者被杀、
+   进程崩溃），PENDING 且 `next_execute_time` 已过 `scan-grace-seconds` 的补发（MQ 丢消息、P4 那条
+   "AFTER_COMMIT 投递失败只记 ERROR"的取舍就在这里落地）。复位不加 `retry_count`——被捞回不是分片的错。
+   扫描必须跨租户，对应 Mapper 用 `@InterceptorIgnore(tenantLine = "true")` 并自带 `tenant_id` 输出列。
+   两件事都用活体验证过（第 [6] 节把分片伪造成 PROCESSING 让扫描捞回），但**"整只 RabbitMQ 停一次再重启"这条
+   最终清单项没有在 P5 跑**：它要重启本机共享的 broker，而投递失败与消息丢失走的是同一个补发分支，
+   留给 P8a 与安全验收一起做，届时按最终清单逐项对账。
+7. **申请单 PENDING→RUNNING 由第一个被领取的阶段消息写**（本轮活体暴露的真实缺陷）：聚合原本只在终态事件
+   （FINISH 完成、DEAD）触发，于是"等苹果生成文件"的那段时间里读侧一直显示"已受理"，用户以为单子卡住了。
+   补一条 `where status = 'PENDING'` 的条件更新（`ApplicationMapper.markRunning`），最多真正写一次，
+   既不会把已落定的终态改回进行中，也不在五个阶段上造成写放大。
+8. **死信不自动重放**：`mfi.token.dlq` 的消费者只记一条"需要人工介入"并保留 `x-mfi-dead-reason` 头。
+   自动重放会把苹果侧的持续故障变成静默的无限循环；重放入口是 P6 的 `POST /api/applications/{no}/retry`，
+   且只作用于失败分片。
+9. **租户并发闸门只有单测覆盖**：`TenantConcurrencyGate` 是每租户一个信号量 + 非阻塞 `tryAcquire`，
+   拿不到就 `hold`（不计重试）。本机每个队列只有 1 个消费者线程（`prefetch=1`），活体里没法把额度占满，
+   硬凑要并发改多租户多分片，超出本轮验收面；跨租户互不影响留给 §11 最终清单的渗透自测那一条统一验。
+10. **桩的 Token ID 必须逐请求唯一**：第一轮活体 6 项失败的根因不在流水线，而在 `scripts/MfiStubServer.java`
+    把两份文件里的 Token ID 都从 `TST0000001` 重排，撞上 `uk_token_tenant_entity(tenant_id, auth_entity_id)`
+    之后第二份文件的行被静默忽略，FINISH 数到 0 个 token 判失败。真实苹果的 Token ID 全局唯一，桩照做即可
+    （前缀改成 `"TST"+序号+"-"`）。这次意外反证了三件事：逐文件推进真的在跑、FINISH 的数量校验有效、
+    DEAD→DLQ→申请单 FAILED 的闭环有效。
+11. **验收专用的短延迟档位**：本轮用命令行把档位临时改成 10s/30s/1m、`processing-timeout-minutes=1`
+    （不改入库的 `application.yml`）。延迟机制一条没换，仍是队列级 TTL + 死信回流；不换档位就无法在一轮脚本里
+    跑完"等两小时的文件"。改动档位的真实代价写在 `PipelineProperties` 注释里：档位即队列名，滚动升级必须
+    先停生产、清干净旧队列再改。
+12. 工具侧的坑（不是产品问题，但每轮都会踩）：Windows 的 `mysql.exe` 往管道写本地代码页（GBK），中文
+    `last_error` 断言全挂，必须显式 `--default-character-set=utf8mb4`；桩与 app 一律 `-encoding UTF-8` /
+    `-Dfile.encoding=UTF-8`；`-pl mfi-service spring-boot:run` 之前不 `install` 会从本地仓库拿旧 `mfi-dao` jar，
+    新增的 Mapper 方法在运行时表现为 `NoSuchMethodError`（P3 第 8 条同一个坑，这次栽在运行期而不是编译期）。
 
 ### 最终验收清单
 
