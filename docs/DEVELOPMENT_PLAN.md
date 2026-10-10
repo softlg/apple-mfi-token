@@ -1,7 +1,8 @@
 # apple-mfi-token 开发计划
 
-> 状态：**P0 已落地**。`mvn -B test` 全绿（9 项），DDL 经 JSqlParser 离线解析 12/12 通过；
-> **真实建库与应用启动仍未验证**，阻塞在 MySQL 账号（§13.4）。
+> 状态：**P0 已完成并本机验收全绿**。`mvn test` 9 项全绿；`local` profile 已在真实 MySQL 8.0 上空库启动，
+> Flyway 落 12 张业务表；Redis 与 RabbitMQ 均已本机就绪（§10），P1–P7 无外部依赖阻塞。
+
 > 决策记录见 §13。
 
 ---
@@ -460,13 +461,33 @@ Vite + TypeScript + Pinia + vue-router + Element Plus，`pnpm` 管理。构建�
 | 组件 | 位置 | 启动 |
 |---|---|---|
 | Redis 5.0.14.1 | `D:\tools\redis`，数据 `D:\tools\redis\data`，日志 `D:\tools\redis\logs\redis.log` | `Start-Process D:\tools\redis\redis-server.exe -ArgumentList 'D:\tools\redis\mfi.redis.conf'`（只监听 `127.0.0.1:6379`，本机无口令） |
-| Erlang/OTP 26.2.5.5 | `D:\tools\erlang` | 仅需 `ERLANG_HOME` 指向该目录 |
-| RabbitMQ 3.13.7 | `D:\tools\rabbitmq_server-3.13.7`，节点数据与日志 `RABBITMQ_BASE=D:\tools\rabbitmq_var` | `sbin\rabbitmq-server.bat`（前台进程，不注册服务） |
+| Erlang/OTP 26.2.5.5 | `D:\tools\erlang` | 不单独启动，供 RabbitMQ 使用 |
+| RabbitMQ 3.13.7 | `D:\tools\rabbitmq_server-3.13.7`，节点数据与日志在 `RABBITMQ_BASE=D:\tools\rabbitmq_var`，节点名 `rabbit@<主机名>` | 先 `epmd -daemon`，再按下表设环境变量跑 `sbin\rabbitmq-server.bat`（前台进程，不注册服务） |
 | MySQL 8.0.34 | 复用已运行的 `MySQL80` 服务（3306，非本次新增） | 已在运行 |
 
 `[选型说明]` RabbitMQ 锁 3.13.x 而非 4.x：4.x 要 OTP 27，而 3.13 与 OTP 26.2 是官方配对，且 3.13 的 release 资产里仍有 `rabbitmq-server-windows-*.zip`。Erlang 必须用 `.zip` 而非 `.exe`——安装器写注册表会触发 UAC，免安装归档不需要管理员权限。
 
-本地开发不必设环境变量：`mfi-service/src/main/resources/application-local.yml`（已被 `.gitignore` 的 `**/application-local.yml` 覆盖，实测 `git check-ignore` 命中）提供数据源、Redis、RabbitMQ，启动加 `-Dspring-boot.run.profiles=local`。首次空库靠 JDBC 的 `createDatabaseIfNotExist=true` 建出 `apple_mfi_token`。
+`[免安装 Windows 的三个坑，实测]`
+
+1. **`otp_win64_*.zip` 是根目录展开的**：直接 `unzip -d D:\tools` 会把 `bin/ lib/ erts-*/ releases/ doc/ usr/` 撒进工具根，需事后收进独立目录。
+2. **`erts-*/bin/erl.ini` 里写死的是官方 CI 构建机路径**（`D:\a\otp\otp\otp_win64_26.2.5.5\...`）。解压到别的目录后必须把 `Bindir`/`Rootdir` 改成实际路径，否则 `erl` 定位不到 runtime。
+3. **`epmd.exe` 只存在于 `erts-*/bin`，不在 `erlang\bin`**。zip 版没进 PATH，RabbitMQ 预启动节点连不上 epmd 会报 `Protocol 'inet_tcp': register/listen error: econnrefused` 然后 `BOOT FAILED`。先手工 `erts-*/bin/epmd.exe -daemon`（监听 **4369**，不是 4370），并且启动 RabbitMQ 时 PATH 要同时包含 `D:\tools\erlang\bin` 和 `D:\tools\erlang\erts-14.2.5.4\bin`。
+
+RabbitMQ 启动环境变量（进程级，不改系统 PATH、不写注册表）：
+
+```
+ERLANG_HOME=D:\tools\erlang
+PATH=<...>;D:\tools\erlang\bin;D:\tools\erlang\erts-14.2.5.4\bin
+RABBITMQ_BASE=D:\tools\rabbitmq_var
+RABBITMQ_MNESIA_BASE=D:\tools\rabbitmq_var\mnesia
+RABBITMQ_LOG_BASE=D:\tools\rabbitmq_var\log
+```
+
+`guest/guest` 可用（RabbitMQ 默认只允许 guest 从 localhost 登录），`rabbitmq-diagnostics status` 实测通过。
+
+本地开发不必设应用侧环境变量：`mfi-service/src/main/resources/application-local.yml`（已被 `.gitignore` 的 `**/application-local.yml` 覆盖，实测 `git check-ignore` 命中）提供数据源、Redis、RabbitMQ，启动加 `-Dspring-boot.run.profiles=local`。首次空库靠 JDBC 的 `createDatabaseIfNotExist=true` 建出 `apple_mfi_token`。
+
+单模块启动要先 `mvn -DskipTests install`：只给 `-pl mfi-service` 时 `mfi-apple`/`mfi-dao` 的 SNAPSHOT 不在本地仓库，依赖解析直接失败。
 
 `[已定]` 会话模式：**不启用 sa-token 的 JWT 模式**，不装配 `StpLogicJwtForSimple`，也不再有 `MFI_JWT_SECRET_KEY`。令牌为 uuid，会话数据存 Redis。代价是多实例必须共享同一 Redis（本产品已有 Redis），收益是移除成员/退出登录即时失效且少管理一把密钥。
 
@@ -495,13 +516,13 @@ MFI_SERVER_PORT                    # 默认 8090
 | **P2** 凭证与客户端 | AES-256-GCM 加解密、密钥轮换位、`MfiSslContextBuilder`（PKCS8/PKCS1）、`MfiClientFactory` + Caffeine、`MfiTokenClient` 9 接口、连通性自检；**自签 CA 与双格式测试证书生成脚本**（§13.2） | 自签证书跑通真实 mTLS 握手；PKCS1 兜底分支被覆盖；密文不落地；客户端实例命中缓存；凭证替换后 evict 生效 | 1d |
 | **P3** PPID 池 | CRUD、Excel 导入/模板/导出、余量计算、CAS 条件扣减、`t_tenant_config` 规则读写 | 并发 50 次扣减不超卖；导入逐行错误定位；余量预估与池实际一致 | 1d |
 | **P4** 申请同步段 | 分配算法（型号+SPU 贪心）、事务、AFTER_COMMIT 发消息、`t_application`/`t_application_ppid` 落库、余量接口 | 事务回滚时消息未发出；多 PPID 拆分正确；回滚后余量恢复；重复提交不重复扣减 | 1d |
-| **P5** 异步流水线 | 两 exchange + 6 queue + DLX、5 监听器、延迟计算、CAS 幂等、重试与 DLQ、租户并发闸门、兜底扫描；**自签 CA 要求的 two-way TLS WireMock 桩** | 阶段跃迁/CAS/幂等/延迟计算必须有测试覆盖。**broker 接线（TTL 回流、DLQ、并发闸门）能否验证取决于 §13.4 选 A/B/C**：本机无 RabbitMQ | 2d |
+| **P5** 异步流水线 | 两 exchange + 6 queue + DLX、5 监听器、延迟计算、CAS 幂等、重试与 DLQ、租户并发闸门、兜底扫描；**自签 CA 要求的 two-way TLS WireMock 桩** | 阶段跃迁/CAS/幂等/延迟计算必须有测试覆盖。**broker 接线（TTL 回流、DLQ、并发闸门）本机已具备验证条件**：RabbitMQ 3.13.7 + OTP 26.2.5.5 已在 D 盘跑起（§10、§13.3） | 2d |
 | **P6** 结果与导出 | token 落库、SN 生成、状态聚合、异步导出任务、进度时间线查询、人工重放、销毁 | 时间线显示 5 阶段真实状态；导出 1 万条不 OOM；重放只作用于失败分片 | 1d |
 | **P7** 前端 | 8 个页面 + 租户切换器 + owner 可见性 + 进度时间线组件 | 浏览器实测完整链路：注册→上传证书→导入 PPID→申请→进度→导出 | 2d |
 | **P8a** 本地安全验收 | `docs/mfi-token-flow.md`、日志脱敏复查、跨租户渗透自测、部署说明、§11 最终验收清单逐项 | 除"真证书联调"外的全部验收项通过 | 1d |
 | **P8b** 真证书联调（**阻塞**） | 拿厂商真实证书后验 §13.2 列出的 5 项未验证风险：真实证书链与 CN 校验、`technology` 取值接受度、真实限流阈值、响应字段与文档一致性、苹果侧 PPID 配额 | 不在本次可交付范围，需外部输入才能启动 | 待定 |
 
-合计约 **10.5 人日**（不含 P8b）。P0–P4 与苹果真实网络无关，且本机有 MySQL，可连续真实验证；P5 的纯逻辑可独立验证，broker 接线取决于 §13.4 的选择；P8b 阻塞在外部输入（真实厂商证书）。
+合计约 **10.5 人日**（不含 P8b）。P0–P6 与苹果真实网络无关，本机 MySQL + Redis + RabbitMQ 三件套已就绪，可全程连续真实验证；P7 前端可浏览器实测完整链路；只剩 P8b 阻塞在外部输入（真实厂商证书）。
 
 ### 最终验收清单
 
@@ -559,13 +580,14 @@ MFI_SERVER_PORT                    # 默认 8090
 |---|---|---|
 | MySQL | **8.0.34 已装并运行**（服务 `MySQL80`，3306），客户端在 `C:\Program Files\MySQL\MySQL Server 8.0\bin`；账号由用户提供，P0 已用它真实建库建表 | P0 Flyway 建表、P1 用户租户、P3 PPID、P4 申请同步段**已本地真实验证** |
 | Redis | **已装**：`D:\tools\redis`（tporadowski 5.0.14.1 便携版），仅绑 `127.0.0.1:6379`，`PING` 与读写实测通过 | sa-token 会话直接落 Redis（已取消内存 dao 兜底与 JWT 模式）；SN 取号用真实 `INCRBY` |
-| RabbitMQ | **安装中**：`D:\tools\rabbitmq_server-3.13.7`（官方 windows zip），依赖 `D:\tools\erlang`（OTP 26.2.5.5 免安装 zip，下载中） | 装好后 P5 的 TTL 延迟、死信回流、消费幂等可本地验证；在此之前 P5 只做单元测试级验证 |
+| RabbitMQ | **已装**：`D:\tools\rabbitmq_server-3.13.7` + `D:\tools\erlang`（OTP 26.2.5.5 免安装 zip）。5672/25672 在听，`rabbitmq-diagnostics status` 通过，`guest/guest` 可用，节点数据与日志在 `D:\tools\rabbitmq_var` | P5 的 TTL 延迟、死信回流、消费幂等**可本地真实验证**；方案 C 的兜底不再需要。免安装三个坑见 §10 |
+
 | Docker | **未安装** | `docker-compose.yml` 仅作为有 Docker 的环境与服务器部署用，本机起不来 |
 | winget | **命令存在但无任何输出**（源不可用） | 安装一律走 GitHub release 直下 + 解压 |
 
 P5 的应对（已由用户选定）：
 
-- **A. 本机装 Redis + RabbitMQ —— 已选并执行**。补充实测：原以为"Windows 下需管理员安装"，实际 `otp_win64_*.zip` 与 `rabbitmq-server-windows-*.zip` 都是免安装归档，解压到 D 盘 + 设 `ERLANG_HOME`/`RABBITMQ_BASE` 即可跑，**全程不需要管理员权限、不写注册表、不占 C 盘**。
+- **A. 本机装 Redis + RabbitMQ —— 已选并执行完毕（2026-10-10）**。补充实测：原以为"Windows 下需管理员安装"，实际 `otp_win64_*.zip` 与 `rabbitmq-server-windows-*.zip` 都是免安装归档，但并不是解压就能跑——要先收纳根展开、改写 `erl.ini` 的 CI 构建机路径、并手工 `epmd -daemon`（详见 §10）。全程不需要管理员权限、不写注册表、不占 C 盘。P0–P7 均可本地验证。
 - B. 指一台有中间件的开发服务器 —— 未采用（会外泄开发地址与账号）。
 - C. 分层验证 —— 保留为兜底：若 RabbitMQ 起不来，P5 的阶段跃迁/CAS/幂等仍用单测直接调 handler 验证。
 
