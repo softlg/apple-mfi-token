@@ -1,7 +1,8 @@
 # apple-mfi-token 开发计划
 
-> 状态：**P0 已完成并本机验收全绿**。`mvn test` 9 项全绿；`local` profile 已在真实 MySQL 8.0 上空库启动，
-> Flyway 落 12 张业务表；Redis 与 RabbitMQ 均已本机就绪（§10），P1–P7 无外部依赖阻塞。
+> 状态：**P0、P1 已完成并本机验收全绿**（P1 为 33 项断言 0 失败，见 §11）。`mvn test` 9 项全绿；
+> `local` profile 在真实 MySQL 8.0 上跑通注册/登录/成员管理与跨租户渗透自测，Redis 承载 sa-token 会话；
+> RabbitMQ 亦已本机就绪（§10），P2–P7 无外部依赖阻塞。
 
 > 决策记录见 §13。
 
@@ -512,7 +513,7 @@ MFI_SERVER_PORT                    # 默认 8090
 | **P0** 底座 **（已完成，本机验收全绿）** | 父 POM + 3 模块 POM、`.gitignore`、`.gitattributes`、`docker-compose.yml`、`.env.example`、启动类、`application.yml`、Flyway `V1__baseline_schema.sql`（12 张表）、统一响应/异常/6 个枚举、`TenantContext`、MyBatis-Plus 租户拦截器与全局表白名单、sa-token 路由与租户绑定拦截器、`/api/health`；收尾追加：会话从 JWT 模式切到 sa-token Redis 模式（删 `StpLogicJwtForSimple` 与 `MFI_JWT_SECRET_KEY`）、补 `spring.data.redis` 配置、修正 `.gitignore` 里根锚定的 `application-local.yml` 路径 | **已验证**：`mvn test` 9/9（上下文缺失必须抛错、`runAs` 嵌套还原、白名单仅 2 张表且断言其数量）；DDL 12/12 JSqlParser 解析；三模块编译与 install SUCCESS；`local` profile 空库启动成功，Flyway 落 `apple_mfi_token` 共 12 张业务表 + `flyway_schema_history`、163 列，`uk_ppid_tenant_ppid_spu`/`uk_token_tenant_entity`/`uk_shard_application_ppid`/`idx_shard_scan`/`uk_credential_tenant` 全部实测存在；`/api/health` 200、`/v3/api-docs` 200（OpenAPI 3.1）、`/swagger-ui` 200、未登录访问 `/api/**` 返回 `{"code":"A0401"}` + HTTP 401 |
 
 
-| **P1** 用户与租户 | register/login/logout/profile/switch-tenant、成员 CRUD、owner 校验注解、密码策略与 Argon2/BCrypt | 双租户双用户互不可见；非 owner 调用 owner 接口返回 403；切换租户后数据随上下文变化 | 1d |
+| **P1** 用户与租户 **（已完成，本机验收全绿）** | register/login/logout/profile/switch-tenant、成员列表/邀请/启停/移除/转让 owner、`TenantAccess` 两道入口守卫、Argon2id 密码哈希（`spring-security-crypto` + 显式带 BouncyCastle）；收尾追加：**owner 位不再缓存进会话**，`TenantBindingInterceptor` 每请求回库取成员与租户状态，会话只留"当前租户 ID"这一选择偏好；`BizException` 按错误码分流 HTTP（NOT_OWNER→403、UNAUTHORIZED/BAD_CREDENTIALS→401、其余→400）；`TenantMemberMapper` 只保留 `selectByUserId`/`selectByTenantAndUser` 两条按 user_id 自缚的放行查询 | **已验证**（对真实 MySQL + Redis 跑 33 项断言，0 失败）：4 租户 8 账号下各租户成员列表互不可见；A 拿乙租户成员 ID 做删除被当作"不存在"拒掉且乙租户数据无变化；C 在甲/乙之间切换后 `/api/members` 结果随上下文变化；非 owner 移除成员与转让 owner 返回 HTTP 403 + `A0403`；成员被停用后原会话立刻拿不到租户上下文（`A0410`），重新启用即恢复；转让 owner 后操作人下一次请求即失去权限、目标成员立刻获得，该租户仍恰好 1 个 owner（库内 `having owners<>1` 零行）；账号不存在与密码错误返回同码同文案；`t_user.password_hash` 全为 `$argon2id$v` 前缀；Redis 实测 `mfi-token:login:session:<userId>` 的 `dataMap` 仅含 `currentTenantId`，令牌为 uuid 且不含 JWT 结构；SQL 日志实测业务表带 `deleted = 0 AND tenant_id = N`、放行查询不带 tenant_id、`insert` 由拦截器补 `tenant_id` | 1d |
 | **P2** 凭证与客户端 | AES-256-GCM 加解密、密钥轮换位、`MfiSslContextBuilder`（PKCS8/PKCS1）、`MfiClientFactory` + Caffeine、`MfiTokenClient` 9 接口、连通性自检；**自签 CA 与双格式测试证书生成脚本**（§13.2） | 自签证书跑通真实 mTLS 握手；PKCS1 兜底分支被覆盖；密文不落地；客户端实例命中缓存；凭证替换后 evict 生效 | 1d |
 | **P3** PPID 池 | CRUD、Excel 导入/模板/导出、余量计算、CAS 条件扣减、`t_tenant_config` 规则读写 | 并发 50 次扣减不超卖；导入逐行错误定位；余量预估与池实际一致 | 1d |
 | **P4** 申请同步段 | 分配算法（型号+SPU 贪心）、事务、AFTER_COMMIT 发消息、`t_application`/`t_application_ppid` 落库、余量接口 | 事务回滚时消息未发出；多 PPID 拆分正确；回滚后余量恢复；重复提交不重复扣减 | 1d |
@@ -597,11 +598,20 @@ P5 的应对（已由用户选定）：
 2. **销毁 token**：是否开放 `destroyUnusedAuthEntities` 给租户自助？不可逆，我按"仅 owner + 二次确认"设计。
 3. **通知渠道**：建议改为邮件 + 可配 webhook，不再用钉钉（MES 那条按 `company_code` 路由到钉钉群，租户是外部厂商时不适用）。
 4. **部署形态**：单进程（后端 + 打包进 `static/` 的前端）还是前后端两个镜像？我默认单进程。
-5. **仓库可见性**（新增，阻塞推送）：`origin` 实测为 **public**，而 §6.4 写明了 MES 里硬编码凭证的文件与行号。公开前先把它改成 private，或把 §6.4 的路径/行号从文档里摘掉。
+5. **仓库可见性**（未处理）：`origin` 实测为 **public**，而 §6.4 写明了 MES 里硬编码凭证的文件与行号；
+   2026-10-09 18:25 该仓库已被外部推上 `origin/main`（3 个 P0 提交），即 §6.4 的位置信息**已经公开**，
+   现在改可见性只能阻止后续读者，不能撤销已发布内容。真正的处置仍是 §6.4 的三条：重新签发该厂商证书、
+   从 MES 移除硬编码、评估 git 历史清理。P1 及之后的提交不含任何凭证，因此自 P1 起按 AGENTS.md 的
+   push policy 正常推送，不再因可见性问题扣住。
+6. **P1 的一处设计偏离**（已实施，需你确认是否保留）：owner 位**不写会话**，每次请求回库读成员与租户状态。
+   代价是每个 HTTP 请求多两次主键查询；收益是移除成员/停用/转让 owner 立即生效，不存在"已登录会话带着旧
+   权限继续操作"的窗口。若更在意吞吐，可改成 Caffeine 短 TTL（10–30 秒）缓存，但要接受这段窗口期。
 
 
 ---
 
 ## 14. 下一步
 
-计划确认后从 **P0** 开始：建立模块骨架与 Flyway 全量 DDL，先让空服务能起来、租户隔离拦截器生效，再逐阶段推进。编码过程中的偏离会在本文档同步更新。
+P0、P1 已交付并本机验收（§11）。接下来从 **P2** 开始：AES-256-GCM 凭证加解密 + `MfiSslContextBuilder`
++ `MfiClientFactory`，并配套 §13.2 的自签 CA 与双格式测试证书脚本，先让 mTLS 握手在本地真实成立，
+再进入 P3 的 PPID 池。编码过程中的偏离会在本文档同步更新。

@@ -84,6 +84,11 @@ Verified on the development host:
   `.env.example`.
 - Sessions use sa-token's Redis dao (uuid tokens, state stored in Redis). Do not reintroduce
   `sa-token-jwt`, `StpLogicJwtForSimple`, or a JWT signing secret.
+- The session carries only `currentTenantId`, a selection preference. `owner_flag` is re-read from
+  `t_tenant_member` on every request by `TenantBindingInterceptor`; never cache it in the session,
+  because cached privileges survive member removal and owner transfer.
+- Passwords use Argon2id through `PasswordHasher`. Do not store, return, or log `password_hash`,
+  and do not differentiate "account not found" from "wrong password" in login responses.
 - Do not log `auth_entity_id`, `secret_key`, `accessory_uuid`, full PPID lists, or any credential
   material. Log counts and fingerprints instead.
 - Do not hardcode business parameters that `t_tenant_config` already covers (quantity ratio, tokens

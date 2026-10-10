@@ -26,8 +26,21 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(BizException.class)
     public ResponseEntity<R<Void>> onBiz(BizException e) {
-        log.warn("业务校验不通过: code={}, message={}", e.getErrorCode().getCode(), e.getMessage());
-        return status(HttpStatus.BAD_REQUEST, R.fail(e.getErrorCode(), e.getMessage()));
+        ErrorCode code = e.getErrorCode();
+        log.warn("业务校验不通过: code={}, message={}", code.getCode(), e.getMessage());
+        return status(httpStatusOf(code), R.fail(code, e.getMessage()));
+    }
+
+    /**
+     * 同一套 BizException 按错误码分流 HTTP 状态：403 表示"知道是谁但没资格"，
+     * 401 表示"连身份都不成立"，其余业务拒绝统一 400。
+     */
+    private static HttpStatus httpStatusOf(ErrorCode code) {
+        return switch (code) {
+            case NOT_OWNER -> HttpStatus.FORBIDDEN;
+            case UNAUTHORIZED, BAD_CREDENTIALS -> HttpStatus.UNAUTHORIZED;
+            default -> HttpStatus.BAD_REQUEST;
+        };
     }
 
     @ExceptionHandler(NotLoginException.class)

@@ -2,6 +2,10 @@ package com.galaplat.mfi.security;
 
 import cn.dev33.satoken.session.SaSession;
 import cn.dev33.satoken.stp.StpUtil;
+import com.galaplat.mfi.dao.entity.TenantMemberPO;
+import com.galaplat.mfi.dao.entity.TenantPO;
+import com.galaplat.mfi.dao.mapper.TenantMapper;
+import com.galaplat.mfi.dao.mapper.TenantMemberMapper;
 import com.galaplat.mfi.dao.tenant.TenantContext;
 import com.galaplat.mfi.dao.tenant.TenantPrincipal;
 import jakarta.servlet.http.HttpServletRequest;
@@ -10,17 +14,29 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.servlet.HandlerInterceptor;
 
 /**
- * 把登录态里的当前租户绑定到 {@link TenantContext}，请求结束后必须清理。
+ * 把登录态里的当前租户解析成 {@link TenantContext}，请求结束后必须清理。
  *
- * <p>登录但尚未选定租户时不绑定，也不报错：由业务层的 {@code requireTenantId()} 在使用点拒绝，
- * 这样 {@code /api/auth/**} 这类无需租户的接口仍可正常访问。
+ * <p>会话里只存"当前租户 ID"这一个偏好，owner 标志每次请求都回库取，不进会话缓存。
+ * 原因是缓存过的权限无法即时回收：移除成员或转让 owner 后，对方已登录的会话仍会带着旧的
+ * owner 位继续操作。这里多付一次主键查询，换取权限变更即时生效。
+ *
+ * <p>登录但尚未选定租户、或所选租户已失效时都不绑定、也不报错：由业务层的
+ * {@code TenantAccess.requireTenantId()} 在使用点拒绝，这样 {@code /api/auth/**}
+ * 这类无需租户的接口仍可正常访问。
  */
 @Component
 public class TenantBindingInterceptor implements HandlerInterceptor {
 
-    /** sa-token 会话中当前生效租户的键 */
+    /** sa-token 会话中当前生效租户的键，仅表示选择偏好，不承载权限 */
     public static final String SESSION_TENANT_ID = "currentTenantId";
-    public static final String SESSION_OWNER_FLAG = "currentTenantOwner";
+
+    private final TenantMemberMapper tenantMemberMapper;
+    private final TenantMapper tenantMapper;
+
+    public TenantBindingInterceptor(TenantMemberMapper tenantMemberMapper, TenantMapper tenantMapper) {
+        this.tenantMemberMapper = tenantMemberMapper;
+        this.tenantMapper = tenantMapper;
+    }
 
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) {
@@ -28,15 +44,20 @@ public class TenantBindingInterceptor implements HandlerInterceptor {
             return true;
         }
         SaSession session = StpUtil.getSession(false);
-        if (session == null) {
+        if (session == null || !(session.get(SESSION_TENANT_ID) instanceof Number number)) {
             return true;
         }
-        Object tenantId = session.get(SESSION_TENANT_ID);
-        if (!(tenantId instanceof Number number)) {
+        long tenantId = number.longValue();
+        long userId = StpUtil.getLoginIdAsLong();
+        TenantMemberPO member = tenantMemberMapper.selectByTenantAndUser(tenantId, userId);
+        if (member == null || !Integer.valueOf(1).equals(member.getStatus())) {
             return true;
         }
-        boolean owner = Boolean.TRUE.equals(session.get(SESSION_OWNER_FLAG));
-        TenantContext.bind(new TenantPrincipal(number.longValue(), StpUtil.getLoginIdAsLong(), owner));
+        TenantPO tenant = tenantMapper.selectById(tenantId);
+        if (tenant == null || !Integer.valueOf(1).equals(tenant.getStatus())) {
+            return true;
+        }
+        TenantContext.bind(new TenantPrincipal(tenantId, userId, Integer.valueOf(1).equals(member.getOwnerFlag())));
         return true;
     }
 

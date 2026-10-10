@@ -22,8 +22,14 @@ public enum ErrorCode {
     /** 未登录或登录态失效 */
     UNAUTHORIZED("A0401", "未登录或登录状态已失效"),
 
+    /** 账号或密码不正确，不区分哪一个错，避免账号枚举 */
+    BAD_CREDENTIALS("A0402", "账号或密码不正确"),
+
     /** 需要租户 owner 身份 */
     NOT_OWNER("A0403", "该操作仅限租户 owner"),
+
+    /** 登录账号已被占用 */
+    ACCOUNT_TAKEN("A0409", "登录账号已存在，请换一个"),
 
     /** 无生效租户，或已不属于该租户 */
     TENANT_UNAVAILABLE("A0410", "当前账号没有可用的租户上下文"),
