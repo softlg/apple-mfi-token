@@ -514,7 +514,7 @@ MFI_SERVER_PORT                    # 默认 8090
 
 
 | **P1** 用户与租户 **（已完成，本机验收全绿）** | register/login/logout/profile/switch-tenant、成员列表/邀请/启停/移除/转让 owner、`TenantAccess` 两道入口守卫、Argon2id 密码哈希（`spring-security-crypto` + 显式带 BouncyCastle）；收尾追加：**owner 位不再缓存进会话**，`TenantBindingInterceptor` 每请求回库取成员与租户状态，会话只留"当前租户 ID"这一选择偏好；`BizException` 按错误码分流 HTTP（NOT_OWNER→403、UNAUTHORIZED/BAD_CREDENTIALS→401、其余→400）；`TenantMemberMapper` 只保留 `selectByUserId`/`selectByTenantAndUser` 两条按 user_id 自缚的放行查询 | **已验证**（对真实 MySQL + Redis 跑 33 项断言，0 失败）：4 租户 8 账号下各租户成员列表互不可见；A 拿乙租户成员 ID 做删除被当作"不存在"拒掉且乙租户数据无变化；C 在甲/乙之间切换后 `/api/members` 结果随上下文变化；非 owner 移除成员与转让 owner 返回 HTTP 403 + `A0403`；成员被停用后原会话立刻拿不到租户上下文（`A0410`），重新启用即恢复；转让 owner 后操作人下一次请求即失去权限、目标成员立刻获得，该租户仍恰好 1 个 owner（库内 `having owners<>1` 零行）；账号不存在与密码错误返回同码同文案；`t_user.password_hash` 全为 `$argon2id$v` 前缀；Redis 实测 `mfi-token:login:session:<userId>` 的 `dataMap` 仅含 `currentTenantId`，令牌为 uuid 且不含 JWT 结构；SQL 日志实测业务表带 `deleted = 0 AND tenant_id = N`、放行查询不带 tenant_id、`insert` 由拦截器补 `tenant_id` | 1d |
-| **P2** 凭证与客户端 | AES-256-GCM 加解密、密钥轮换位、`MfiSslContextBuilder`（PKCS8/PKCS1）、`MfiClientFactory` + Caffeine、`MfiTokenClient` 9 接口、连通性自检；**自签 CA 与双格式测试证书生成脚本**（§13.2） | 自签证书跑通真实 mTLS 握手；PKCS1 兜底分支被覆盖；密文不落地；客户端实例命中缓存；凭证替换后 evict 生效 | 1d |
+| **P2** 凭证与客户端 **（已完成，本机验收 48/48）** | AES-256-GCM 加解密（AAD 绑 `tenant_id` + 字段名）、密钥环与 `encrypt_key_id` 轮换位、`MfiSslContextBuilder`（PKCS#8/PKCS#1 双格式 + 私钥/证书配对预检）、`MfiClientFactory`（Caffeine，512 租户上限 + 30 分钟 `expireAfterAccess` 兼作明文私钥驻留上限）、`MfiTokenClient` 9 接口、`MfiProbeService` 连通性自检、`TenantProfileService`/`TenantConfigService` 与 owner 守卫的 `TenantController`/`TenantCredentialController`；**自签联调材料**：`scripts/gen-dev-certs.sh`（CA + 服务端 + PKCS#8/PKCS#1 两套租户证书 + 一张过期证书，写到 gitignored 的 `.dev-certs/`）、`scripts/MfiStubServer.java`（JDK 单文件源码启动的 two-way TLS 桩，`needClientAuth`）、`scripts/verify-p2.py`（活体验收脚本） | **已验证**：`mvn test` 36/36（apple 12 含 4 个**真实 mTLS 握手**：PKCS#8 与 PKCS#1 各自握手成功且桩侧读到客户端证书 DN、他签 CA 的客户端被拒且请求数为 0、不受信服务端被拒；8 个 `MfiSslContextBuilder` 断言含"A 证书 + B 私钥"配对检测为 false；15 个 service 断言含跨租户 AAD 替换解密失败、轮换后 v0 历史密文仍可解、密钥环空/未知 activeKeyId/非 Base64/16 字节全部启动期拒绝）；对真实 MySQL + Redis + 本地 mTLS 桩跑 **48 项活体断言，0 失败**：垃圾 PEM/不配对/过期证书三道校验（过期给 `B0410`）、PKCS#1 链式材料入库、`verify` 返回 `reachable=true, httpStatus=200` 且桩侧日志出现 `clientCert=CN=MFI Tenant B Client`、库内 `cert_cipher`/`key_cipher` 无 `BEGIN` 标记且互不相同、`encrypt_key_id=v1` 与指纹一致、应用日志私钥文本增量 0、**两次自检只装配 1 次客户端**（命中缓存）、替换凭证后重新装配 +1 且桩侧看到新证书主体、跨租户读不到凭证（`B0404`）、非 owner 改凭证与改业务参数均 HTTP 403 + `A0403`、删除凭证后自检给业务错误而非 500；`.gitignore` 补 `*.crt`/`.dev-certs/`/`__pycache__/` 并实测 `git check-ignore` 命中 | 1d |
 | **P3** PPID 池 | CRUD、Excel 导入/模板/导出、余量计算、CAS 条件扣减、`t_tenant_config` 规则读写 | 并发 50 次扣减不超卖；导入逐行错误定位；余量预估与池实际一致 | 1d |
 | **P4** 申请同步段 | 分配算法（型号+SPU 贪心）、事务、AFTER_COMMIT 发消息、`t_application`/`t_application_ppid` 落库、余量接口 | 事务回滚时消息未发出；多 PPID 拆分正确；回滚后余量恢复；重复提交不重复扣减 | 1d |
 | **P5** 异步流水线 | 两 exchange + 6 queue + DLX、5 监听器、延迟计算、CAS 幂等、重试与 DLQ、租户并发闸门、兜底扫描；**自签 CA 要求的 two-way TLS WireMock 桩** | 阶段跃迁/CAS/幂等/延迟计算必须有测试覆盖。**broker 接线（TTL 回流、DLQ、并发闸门）本机已具备验证条件**：RabbitMQ 3.13.7 + OTP 26.2.5.5 已在 D 盘跑起（§10、§13.3） | 2d |
@@ -524,6 +524,14 @@ MFI_SERVER_PORT                    # 默认 8090
 | **P8b** 真证书联调（**阻塞**） | 拿厂商真实证书后验 §13.2 列出的 5 项未验证风险：真实证书链与 CN 校验、`technology` 取值接受度、真实限流阈值、响应字段与文档一致性、苹果侧 PPID 配额 | 不在本次可交付范围，需外部输入才能启动 | 待定 |
 
 合计约 **10.5 人日**（不含 P8b）。P0–P6 与苹果真实网络无关，本机 MySQL + Redis + RabbitMQ 三件套已就绪，可全程连续真实验证；P7 前端可浏览器实测完整链路；只剩 P8b 阻塞在外部输入（真实厂商证书）。
+
+### P2 收尾修正的缺陷（活体验收第二轮才暴露，记录以免复发）
+
+1. **逻辑删除与唯一键冲突**：`application.yml` 里全局 `logic-delete-field: deleted`，而 `uk_credential_tenant(tenant_id)`、`uk_config_tenant_key(tenant_id, config_key)`、`uk_member_tenant_user(tenant_id, user_id)` 都不含 `deleted`。于是"删除凭证 → 再上传"和"移出成员 → 再邀请"都会撞唯一键抛 500（业务参数留空同理）。三处改为按条件的物理删除（`TenantCredentialMapper.deleteByTenant`、`TenantConfigMapper.deleteByKey`、`TenantMemberMapper.deleteByTenantAndUser`）；凭证尤其必须物理删，被删行仍是可解密的密文，留着只增加误用面。
+2. **`updateById` 跳过 null**：`apple_base_url` 想"留空即回到官方地址"清不掉旧覆盖值（MyBatis-Plus 默认 NOT_NULL 更新策略）。改为 `lambdaUpdate().set(...)` 显式写 NULL；`apple_technology` 是 `NOT NULL DEFAULT 'DEFAULT'` 列，留空只能落 `MfiEndpoints.TECHNOLOGY_DEFAULT` 哨兵，注册路径改用同一个常量。
+3. **自检不该 evict**：`MfiProbeService.verify` 原本每次先 `evict` 再取客户端，等于每次自检都重建 SSLContext 与连接池，缓存形同虚设。改为复用缓存，`evict` 只留在凭证替换/删除与 BaseURL/technology 变更这几个真正改变材料的入口。
+4. 新增错误码 `CREDENTIAL_INVALID("B0500")`，把"库里的材料不可用"（解密失败、证书与私钥不配对）与"未配置"（`B0404`）、"已过期"（`B0410`）分成三态。
+5. 业务参数的"留空"语义落到实现：`TenantConfigService.update` 对空值删除覆盖行而不是写入空串，读取时自然回落到 `TenantConfigKey` 默认值，`overridden` 随之回到 false。
 
 ### 最终验收清单
 
@@ -565,8 +573,9 @@ MFI_SERVER_PORT                    # 默认 8090
 结论：**mTLS 握手不需要苹果的证书也能完整验证**。做法是在本地建一套自签 CA 测试夹具：
 
 1. 脚本生成 `ca.crt` + 一个由该 CA 签发的**客户端证书/私钥**（PKCS8 与 PKCS1 各一份，覆盖两条加载分支）
-2. 起一个**要求客户端证书**的本地 HTTPS 桩服务（WireMock 支持 two-way TLS），路径与响应体按苹果规范伪造：
+2. 起一个**要求客户端证书**的本地 HTTPS 桩服务，路径与响应体按苹果规范伪造：
    `requestAuthEntities` 返回 request uuid；`authEntities/{uuid}` 先返回 `downloadAvailability=false` + `retryDownloadAfter`，第二次返回文件名；文件下载返回一份真实构造的 xlsx（含 Provisioning ID / UUID / Secret Key）；`usedAuthEntities/bulk` 返回受理
+   > P2 实测调整：桩改用 `scripts/MfiStubServer.java`（JDK 单文件源码启动，`HttpsServer` + `setNeedClientAuth(true)`，客户端证书从 `HttpsExchange.getSSLSession()` 读）。不引 WireMock：它要靠 KeyStore 材料配 two-way TLS，而这里要验的正是"PEM 能不能装成 SSLContext"，夹具本身越薄结论越干净。P5 若要伪造 `retryDownloadAfter` 之类的时序，再在这个桩上加路由即可。
 3. 租户的 `apple_base_url` 指向该桩，跑通**五阶段全链路 + 延迟 + 重试 + DLQ**
 
 这样能验到的：SSLContext 构造、PKCS1→PKCS8 兜底、mTLS 握手与失败路径、`downloadAvailability` 延迟计算、xlsx 解析入库、阶段 CAS、幂等、重试耗尽。
@@ -612,6 +621,8 @@ P5 的应对（已由用户选定）：
 
 ## 14. 下一步
 
-P0、P1 已交付并本机验收（§11）。接下来从 **P2** 开始：AES-256-GCM 凭证加解密 + `MfiSslContextBuilder`
-+ `MfiClientFactory`，并配套 §13.2 的自签 CA 与双格式测试证书脚本，先让 mTLS 握手在本地真实成立，
-再进入 P3 的 PPID 池。编码过程中的偏离会在本文档同步更新。
+P0、P1、P2 已交付并本机验收（§11）。P2 交付的不只是凭证链路本身：`MfiClientFactory` 已经把"每租户一套证书 +
+可复用连接池 + 变更即失效"这一层做实，后续任何苹果调用都只依赖 `forTenant(tenantId)`。接下来进入 **P3 PPID 池**：
+CRUD、Excel 导入（逐行错误定位）、按产品型号 + SPU 的余量预估、以及带条件的原子扣减——P4 的分配算法要直接建在
+P3 的扣减语义上，所以这里的 CAS 与索引必须先定死。P5 再把 §13.2 的本地 mTLS 桩接进五阶段流水线。
+编码过程中的偏离会在本文档同步更新。

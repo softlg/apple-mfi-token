@@ -107,7 +107,7 @@ public class MemberServiceImpl implements MemberService {
         if (Integer.valueOf(OWNER).equals(member.getOwnerFlag())) {
             throw new BizException(ErrorCode.BIZ_REJECTED, "owner 不能被移除；如需变更请先进入转让流程");
         }
-        tenantMemberMapper.deleteById(member.getId());
+        tenantMemberMapper.deleteByTenantAndUser(member.getTenantId(), member.getUserId());
         log.info("成员移除: tenantId={}, memberId={}", TenantAccess.requireTenantId(), memberId);
     }
 

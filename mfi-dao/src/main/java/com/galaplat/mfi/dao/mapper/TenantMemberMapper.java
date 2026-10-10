@@ -3,6 +3,7 @@ package com.galaplat.mfi.dao.mapper;
 import com.baomidou.mybatisplus.annotation.InterceptorIgnore;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import com.galaplat.mfi.dao.entity.TenantMemberPO;
+import org.apache.ibatis.annotations.Delete;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
@@ -44,5 +45,14 @@ public interface TenantMemberMapper extends BaseMapper<TenantMemberPO> {
             limit 1
             """)
     TenantMemberPO selectByTenantAndUser(@Param("tenantId") long tenantId, @Param("userId") long userId);
+
+    /**
+     * 物理移除成员关系。用 {@code deleteById} 只会把 deleted 置 1，而
+     * {@code uk_member_tenant_user(tenant_id, user_id)} 不含 deleted：被移出的人再次邀请时
+     * 读不到旧行（查询都带 deleted = 0）却插不进新行，直接撞唯一键。
+     * 条件已定死 tenant_id + user_id，仍保留拦截器改写做双保险。
+     */
+    @Delete("delete from t_tenant_member where tenant_id = #{tenantId} and user_id = #{userId}")
+    int deleteByTenantAndUser(@Param("tenantId") long tenantId, @Param("userId") long userId);
 
 }

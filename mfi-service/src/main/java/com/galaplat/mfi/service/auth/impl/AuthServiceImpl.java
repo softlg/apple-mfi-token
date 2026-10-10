@@ -3,6 +3,7 @@ package com.galaplat.mfi.service.auth.impl;
 import cn.dev33.satoken.session.SaSession;
 import cn.dev33.satoken.stp.StpUtil;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.galaplat.mfi.apple.MfiEndpoints;
 import com.galaplat.mfi.common.api.ErrorCode;
 import com.galaplat.mfi.common.exception.BizException;
 import com.galaplat.mfi.dao.entity.TenantMemberPO;
@@ -79,7 +80,7 @@ public class AuthServiceImpl implements AuthService {
         // 若将来支持一人多租户，此规则必须换成独立取号，不能复用 user ID。
         tenant.setTenantCode("T" + user.getId());
         tenant.setTenantName(request.getTenantName());
-        tenant.setAppleTechnology("DEFAULT");
+        tenant.setAppleTechnology(MfiEndpoints.TECHNOLOGY_DEFAULT);
         tenant.setStatus(1);
         tenantMapper.insert(tenant);
 

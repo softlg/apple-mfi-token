@@ -40,6 +40,9 @@ public enum ErrorCode {
     /** 租户 MFI 证书已过期 */
     CREDENTIAL_EXPIRED("B0410", "租户 MFI 客户端证书已过期"),
 
+    /** 库里的凭证材料坏了：解密失败、不配对或无法装配 TLS，需要重新上传 */
+    CREDENTIAL_INVALID("B0500", "租户 MFI 客户端凭证不可用"),
+
     /** 系统内部错误 */
     SYSTEM_ERROR("C0001", "系统内部错误"),
 

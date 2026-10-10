@@ -20,12 +20,17 @@ dist-ssr/
 !.env.example
 *.pem
 *.key
+*.crt
 *.p12
 *.pfx
 *.jks
 *.keystore
 credentials/
 secrets/
+# 本地自签联调材料（CA、服务端与租户证书、主密钥），只在本机存在
+.dev-certs/
+# python 验收脚本的字节码缓存
+__pycache__/
 # 本地覆盖配置可出现在任意模块，根锚定的 src/... 路径匹配不到 mfi-service/src/...
 **/application-local.yml
 **/application-local.yaml

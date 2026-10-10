@@ -101,7 +101,7 @@ Verified on the development host:
 Review these carefully before editing:
 
 - `mfi-apple/src/main/java/com/galaplat/mfi/apple` — per-tenant mTLS construction and caching
-- `mfi-service/src/main/java/com/galaplat/mfi/crypto` — credential encryption at rest
+- `mfi-service/src/main/java/com/galaplat/mfi/credential` — credential encryption at rest
 - `mfi-service/src/main/java/com/galaplat/mfi/pipeline` — five-stage MQ listeners, delay, retry, DLQ
 - `mfi-service/src/main/java/com/galaplat/mfi/security` — `TenantContext`, owner checks, sa-token rules
 - `mfi-dao/src/main/java/com/galaplat/mfi/dao/mybatis` — tenant SQL rewriting and its whitelist
