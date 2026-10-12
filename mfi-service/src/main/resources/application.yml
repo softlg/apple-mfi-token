@@ -92,6 +92,9 @@ sa-token:
   is-share: false
   token-style: uuid
   is-log: false
+  # 会话只走自定义请求头。关掉它 sa-token 既不下发也不再采信 mfi-token cookie：
+  # 默认下发的 cookie 不带 HttpOnly，脚本能读到就等于能拿走会话，浏览器也会自动带着它发请求。
+  is-read-cookie: false
 
 # 凭证静态加密与苹果调用参数。主密钥只从环境变量注入，git/库/日志里都不出现。
 mfi:

@@ -103,4 +103,46 @@
         </plugins>
     </build>
 
+    <profiles>
+        <!--
+          单进程部署：web/dist 存在时把前端产物拷进 classes/static，由同一个 Boot 应用同时托管
+          静态资源与 API。没跑过 pnpm build 时该 profile 不激活，后端构建与测试不受前端影响。
+          前端是 hash 路由，所以不需要为 SPA 另加转发规则。
+        -->
+        <profile>
+            <id>web-ui</id>
+            <activation>
+                <file>
+                    <exists>${basedir}/../web/dist/index.html</exists>
+                </file>
+            </activation>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-resources-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>copy-web-dist</id>
+                                <phase>process-resources</phase>
+                                <goals>
+                                    <goal>copy-resources</goal>
+                                </goals>
+                                <configuration>
+                                    <outputDirectory>${project.build.outputDirectory}/static</outputDirectory>
+                                    <resources>
+                                        <resource>
+                                            <directory>${basedir}/../web/dist</directory>
+                                            <filtering>false</filtering>
+                                        </resource>
+                                    </resources>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
+
 </project>

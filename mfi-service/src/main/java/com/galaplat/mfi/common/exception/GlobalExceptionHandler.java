@@ -14,6 +14,7 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 /**
  * 全局异常处理。
@@ -82,6 +83,16 @@ public class GlobalExceptionHandler {
     public ResponseEntity<R<Void>> onTooLarge(MaxUploadSizeExceededException e) {
         log.info("上传文件超出体积上限: maxBytes={}", e.getMaxUploadSize());
         return status(HttpStatus.BAD_REQUEST, R.fail(ErrorCode.INVALID_PARAM, "文件过大，请拆分后分批导入"));
+    }
+
+    /**
+     * 浏览器会自动索要 favicon.ico 之类的静态资源，前端只打包了 static 目录里的文件。
+     * 缺失按 404 处理即可，不该占用"未预期系统异常"的 ERROR 与堆栈。
+     */
+    @ExceptionHandler(NoResourceFoundException.class)
+    public ResponseEntity<Void> onMissingStaticResource(NoResourceFoundException e) {
+        log.debug("静态资源不存在: path={}", e.getResourcePath());
+        return ResponseEntity.notFound().build();
     }
 
     @ExceptionHandler(Exception.class)

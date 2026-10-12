@@ -84,6 +84,13 @@ Verified on the development host:
   `.env.example`.
 - Sessions use sa-token's Redis dao (uuid tokens, state stored in Redis). Do not reintroduce
   `sa-token-jwt`, `StpLogicJwtForSimple`, or a JWT signing secret.
+- Sessions are header-only. Keep `sa-token.is-read-cookie: false`: sa-token's default cookie is not
+  HttpOnly and the browser attaches it automatically, which reopens CSRF and lets a discarded local
+  token keep the session alive. Downloads therefore go through `fetch` + Blob, not `<a href>`.
+- Do not set `createTime`/`updateTime` on POs. Those columns are DB-managed
+  (`DEFAULT CURRENT_TIMESTAMP` / `ON UPDATE CURRENT_TIMESTAMP`) and are mapped with
+  `FieldStrategy.NEVER`; a read-modify-write `updateById` that carries the old value back in
+  suppresses the automatic bump and freezes every "更新时间" column in the console.
 - The session carries only `currentTenantId`, a selection preference. `owner_flag` is re-read from
   `t_tenant_member` on every request by `TenantBindingInterceptor`; never cache it in the session,
   because cached privileges survive member removal and owner transfer.
@@ -102,6 +109,8 @@ Review these carefully before editing:
 
 - `mfi-apple/src/main/java/com/galaplat/mfi/apple` — per-tenant mTLS construction and caching
 - `mfi-service/src/main/java/com/galaplat/mfi/credential` — credential encryption at rest
+- `web/src/pages/CredentialView.vue` — PEM upload; plaintext must stay in memory only, because
+  accessibility trees expose rendered input values, so never bind PEM text into a visible control
 - `mfi-service/src/main/java/com/galaplat/mfi/pipeline` — five-stage MQ listeners, delay, retry, DLQ
 - `mfi-service/src/main/java/com/galaplat/mfi/security` — `TenantContext`, owner checks, sa-token rules
 - `mfi-dao/src/main/java/com/galaplat/mfi/dao/mybatis` — tenant SQL rewriting and its whitelist

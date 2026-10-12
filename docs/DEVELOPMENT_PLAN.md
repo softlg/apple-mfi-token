@@ -385,6 +385,11 @@ exchange: mfi.token.normal        exchange: mfi.token.delay (TTL → DLX 回流 
 
 新仓库不会复制该凭证，实现时用占位测试证书。
 
+另记一条本仓库自己的事件（P7 浏览器实测期间）：凭证页第一版把私钥文本渲染进了 `textarea`，**可访问性树会把控件值原样暴露
+给自动化工具**，于是一段私钥文本出现在了一次工具输出里。涉及的材料是 `scripts/gen-dev-certs.sh` 生成、只存在于 gitignored
+`.dev-certs/` 的**本机自签开发证书**（`tenant-a.pk8.key`），不是厂商凭证、苹果侧不存在对应实体，因此无需重新签发；但按 §6.3
+的口径这仍是一次要记录的明文外流，修法与"任何页面不得渲染私钥文本"的复查项见 §11 的 P7 偏差第 7 条。
+
 ---
 
 ## 8. API 清单
@@ -466,6 +471,8 @@ POST   /api/tokens/destroy                  调苹果销毁未使用实体   [ow
 ## 9. 前端（Vue3 + Element Plus）
 
 Vite + TypeScript + Pinia + vue-router + Element Plus，`pnpm` 管理。构建产物由 `maven-resources-plugin` 复制进 `mfi-service` 的 `static/`，单进程部署；开发期 Vite proxy 到 `localhost:8090`。
+落地时定的三条形态（理由见 §11 的 P7 偏差）：**hash 路由**（因此后端不做 SPA 转发）、会话令牌**只走 `mfi-token` 请求头**
+（`sa-token.is-read-cookie: false`，cookie 通道整体关掉）、所有下载走 `fetch`+Blob（`<a href>` 带不上请求头）。
 
 | 页面 | 关键交互 |
 |---|---|
@@ -565,7 +572,8 @@ MFI_SERVER_PORT                    # 默认 8090
 | **P4** 申请同步段 **（已完成，本机验收 42/42）** | `ApplicationPO`/`ApplicationPpidPO`/`OperationLogPO` 与三个 Mapper、Flyway `V2__application_idempotency.sql`、`ApplicationService.submit`（一次事务内：凭证与上限前置 → 贪心拆分 → 逐份额度 CAS 扣减 → 落单落分片 → 留痕 → 登记消息）、`ShardMessageProducer`（AFTER_COMMIT 投递）、`RabbitTopology`（`mfi.token.normal` + `mfi.apply.queue` + JSON 转换器）、`POST /api/applications` 与 `GET /api/applications/page`；`PpIdService.planAllocation` 让预览与实际分配共用同一条池查询 | **已验证**：`mvn -o -pl mfi-service -am test` 57/57（新增 `ApplicationServiceImplTest` 9 项：**提交前一条消息都不许离开进程**、触发提交后回调才发且只发分片数那么多条、抢不到额度时不登记任何提交后回调、额度不足先拒后扣、上限闸门在池查询之前、证书过期快速失败、同 requestId 命中已有单且不开事务、唯一键撞库回滚后返回对手的单、脱离事务登记消息直接失败）；活体 42/42（真实 MySQL + Redis + RabbitMQ）：120 份在 100+30 的池上拆成 `[100,20]`、扣满的那份额度**余量归零自动停用**、库里分片 2 行合计 120、发起人/technology 快照落库、留痕只记数量不含 PPID 清单、**队列 `mfi.apply.queue` 实测正好多出 2 条**（rabbitmqctl 对账）、重复提交返回同一单号且 `applied_quantity` 不变、不带 requestId 的两次提交是两个单（NULL 不受唯一约束）、上限 3 挡掉 4 且额度分文未动、**两线程抢最后 1 份恰好成一个**且输家库里无单无扣减、跨租户 4 项、非法状态给 `A0400` 而不是 500、openapi 不泄漏 `idempotency_key`；运行日志 `grep -ac 'Preparing\|P4-BIG\|PRIVATE KEY'` 全为 0 | 1d |
 | **P5** 异步流水线 **（已完成，本机验收 54/54）** | `RabbitTopology`（`mfi.token.normal` + `mfi.token.delay` 两个 direct exchange、5 个阶段队列 + 1 个 DLQ、按 `delayTiers` 逐档位声明"队列级 TTL + 死信回流到本阶段队列"的延迟队列）、`PipelineNames`（档位毫秒数 ↔ 队列名互转，取整到不小于它的档位）、`StageRunner`（claim CAS → 回库读 → 早到重排 → 租户闸门 → 处理器 → 跃迁，先落库后投递）、`StageOutcome` 四态、5 个阶段处理器与 1 个 `PipelineListener`（5 个 `@RabbitListener`）、`MfiUtcTime`（苹果 UTC 时刻 + 1 分钟安全余量、解析失败回落 1h）、`TenantConcurrencyGate`、`ApplicationAggregator`（单条条件 UPDATE，终态不被迟到的聚合改回 RUNNING）、`PipelineScanner`（PROCESSING 超时复位 + PENDING 到点补发）、`DeadLetterListener`；**fixture 扩展**：`scripts/MfiStubServer.java` 增加五条剧情（正常/`WAIT`+`retry_download_after`/两小时后到货/403 永久拒/503 可恢复）与逐文件切片，`scripts/verify-p5.py`（54 项活体断言） | **已验证**：`mvn -o -pl mfi-service -am test` 全绿（apple 17 + dao 12（3 项真实库并发 IT 无 `MFI_IT_DB` 时跳过）+ service 94），其中 `StageRunnerTest` 16 项盯三条会直接造成重复调苹果/丢进度/耗死分片的规则（**领取返回 0 时回库读、闸门、处理器一条都不走到**、跃迁落库成功才投下一跳、等待原样回传 `retryCount` 而 RETRY 才 +1、早于计划时间重排、重试耗尽落 DEAD 并投死信），`PipelineNamesTest` 8 项（档位取整、非法档位、队列名稳定性），`PipelineScannerTest` 5 项（复位不加重试、补发只到点、跨租户），5 个处理器测试 29 项；**对真实 MySQL + Redis + RabbitMQ + 自签 CA 的 two-way TLS 桩跑 54 项活体断言，0 失败**（桩用 JDK `HttpsServer` 手写而不是计划里写的 WireMock，两-way TLS 与剧情都要自己控，200 行内可 review，且不必为 fixture 再引一套 Jetty）：7 个 token 走完 APPLY→FILE_NAME→FILE_CONTENT→REGISTER→FINISH 且桩给的 request id 落库、**逐文件推进**（两个文件各登记一次且 `token_count` 合计 7）、配件 UUID 逐行唯一（重试不换 uuid）、苹果 CRC32 原样落库、列序解析（Token ID 与 token 原文各归其列、base64 解出内容一致）、留痕 5 条前进记录且**不含 token 原文与 Token ID**、`retry_download_after` 到货前 PENDING + `next_execute_time` 在未来且 `retry_count=0`、`rabbitmqctl` 实测消息躺在 `mfi.delay.name.*` 档位队列里（TTL+死信回流闭环）、等待中的申请单读侧显示 RUNNING、桩侧对同一 PPID 只回一次"还在生成"、超过最长档位到货后重排且不消耗重试且时刻不倒退、**把分片伪造成 PROCESSING 后兜底扫描复位**且不加重试、在飞消息到货被 CAS 挡下（日志"判定为重复投递或已被推进"且分片没被改坏）、403 直接 DEAD 且只调苹果一次 + 死信被记成需要人工介入 + 全分片失败聚合 FAILED、503 按 10s/30s/1m 退避且总调用次数正好等于上限 3、**五个阶段队列与 DLQ 收口时全部 0 积压**、运行日志 `grep` 不到 token 原文/Token ID/`PRIVATE KEY`；本轮补掉一处真实缺陷（申请单在等待期间一直显示 PENDING，见下方第 7 条），并修掉 fixture 的 Token ID 复用问题（第 10 条） | 2d |
 | **P6** 结果与导出 **（已完成，本机验收 93/93）** | SN：`SnUtil`（企业段 + PPID 后 6 位清洗 + 年字母 + MMDD，移植 MES 规则）+ `SnAllocator`（Redis `INCRBY` 一次占一段连续流水，**计数器 key 的粒度严格等于 SN 前缀粒度**，生产日按 `Asia/Shanghai` 取，4 位补零流水超上限只变长不截断）+ `FinishStageHandler` 只给缺号行发号并做收口两道校验；读侧：`ApplicationQueryService`（详情一次给全五阶段进度/分片明细/token 汇总/时间线）、`TokenQueryService`（分页 + 按 SN 反查，响应不含四个凭证列）、`GET /api/applications/{no}`、`/{no}/files`、`GET /api/tokens/page`；人工重放：`POST /api/applications/{no}/retry` + `ApplicationMapper.reopen`（只复位 FAILED/PARTIAL_FAILED 并抹掉上一轮死因）；异步导出：`ExportTaskPO`/`ExportTaskMapper`/`ExportProperties`/`ExportExecutorConfig`（有界线程池 + 队列满即拒）、`ExportServiceImpl`（keyset 分页、`max-rows` 触顶截断记 WARN、僵死 PROCESSING 扫描、产物目录约束、只认发起人）、`TokenExportRow`（十列列序即契约）、CSV 带 UTF-8 BOM / XLSX、RFC 5987 文件名、`GET /api/export-tasks/{taskNo}` 与 `/download`；销毁：`TokenDestroyRequest`/`TokenDestroyVo`/`TokenDestroyService` + `POST /api/tokens/destroy`（仅 owner、单号原样二次确认、只对 ISSUED 候选、按 PPID 归堆后每 100 个一批、被拒即停手、`hasMore` 如实回报）；**收尾修正**：`TokenMapper` 三处补 `status <> 'DESTROYED'`、`TokenStatus.destroyable()` 收窄到 ISSUED、`MfiTokenClient` 日志摘掉 PPID 与实体清单、`ResponseWrapAdvice` 不再包装 `ResponseEntity`；**fixture**：`scripts/MfiStubServer.java` 补 `unusedAuthEntities` 路由与 `REGISTERFAIL`/`DESTROYFAIL` 两条剧情 + `auth_entities`/`auth_entity_ids` 计数日志（一律不带 PPID），`scripts/verify-p6.py`（93 项活体断言） | **已验证**：`mvn -o -am -pl mfi-service test` 全绿（apple 17 + dao 12，其中 3 项真实库并发 IT 无 `MFI_IT_DB` 时跳过 + service 153），P6 新增/改写 58 项：`SnUtilTest` 9（逐条对着 MES 的 `generateSnPrefix` 断言，厂商产线已按这 16 位排产）、`SnAllocatorTest` 6（指定生产日期入参，跨年/跨月边界不依赖跑测试的当天）、`FinishStageHandlerTest` 9（可重入：只补空号行、绝不换掉已发出的 SN）、`ApplicationQueryServiceTest` 7、`TokenQueryServiceTest` 6、`ExportServiceImplTest` 9（翻页/截断/产物路径约束/只认发起人）、`TokenDestroyServiceTest` 10（**非 owner 在读任何数据之前就被拒**、二次确认必须逐字相同、按 PPID 归堆后切成 `[100,20,1]` 三批、一批被拒即停手并如实回已销毁数、留痕只记数量、`auth_entity_id` 为空判为数据损坏而非静默跳过）、`ResponseWrapAdviceTest` 2；**对真实 MySQL + Redis + RabbitMQ + 自签 CA 的 two-way TLS 桩跑 93 项活体断言，0 失败**：六个 token 走完五阶段且 SN 前段实测等于「E + PPID 后 6 位 + 年字母 B + MMDD」、4 位流水连续、互不重复，**三张单共用同一条计数器**（PPID 后 6 位同为时间戳 → 前段相同）并按 `1-6`、`7-1206` 连续推进不重号；详情一次给全五阶段（`reached=succeeded=1`、`dead=0`）、时间线五条 `STAGE_ADVANCE`、token 汇总按状态分组、两份文件行数之和=申请量且都 SUCCESS；token 分页六行含 PPID/SN/状态而**响应体内 `encodedToken`/`secretKey`/`authEntityId`/`accessoryUuid` 四个键一个都没有**、按 SN 反查命中 1 行；CSV 下载带 UTF-8 BOM、表头与十列列序逐字对齐、行数=1+6、产物里能看到 base64 的 token 原文与刚发出的 SN、库里只存 `E261012-xxxx.csv` 这一相对文件名；导出越权六项（隔壁租户读不到任务号也拿不到字节、同租户成员读不到 owner 的任务、成员可以自己发起、反过来 owner 也读不到成员的）；**1200 行的真实大单在 `page-size=100 / max-rows=1000` 下翻满 10 页并触顶截断**（`totalRows=1000` + WARN 日志 + XLSX 是合法 zip 容器 + 留痕 `EXPORT\|1000`）；`REGISTERFAIL` 剧情让分片 DEAD 在 REGISTER（退避一次后终态、桩侧正好被打了两次注册、六个 token 停在 ISSUED 且无 SN、聚合 FAILED 且写了 `fail_reason`、进度页 REGISTER `dead=1` 而 FINISH `reached=0`）；销毁的四道拒绝（非 owner HTTP 403、二次确认不一致、隔壁租户、确认位为空）之后**桩侧销毁调用增量为 0 且库里状态未变**；正常销毁 `selected=destroyed=6`、一个批次、六行 DESTROYED、留痕 `DESTROY\|6` 且 detail 里既无 PPID 也无 `AUTH`；对已注册的单候选为 0（不报错也不打苹果）、重复点击不再有调用；**销毁之后人工重放**这一节一次证完三处 mapper 修正：`replayedCount=1` 且分片回到 REGISTER/PENDING（`retry_count` 归零、`last_error` 清空）、单子被拉回进行中且上一轮 `fail_reason` 抹掉、走到 FINISH/SUCCESS、**桩侧注册调用没有新增**（已作废实体不再送苹果）、六行仍是 DESTROYED 且收口不把它们算成漏注册、**已销毁的实体一个序列号也没白占**（SN 仍为 0）、整单 SUCCESS + `finish_time` 重新落上 + `token_count=6`、无 DEAD 时重放是空操作而不是报错；日志红线八项（三份 PPID 明文、SN 前段、token 原文的 base64 前缀、`==> Parameters`、`PRIVATE KEY` 在运行日志里全部 grep 为 0，产物目录只含 `<任务号>.<后缀>`）；五个阶段队列与 DLQ 收口 0 积压；本轮把"导出 1 万条不 OOM"这条验收改成**低档位让翻页与截断都真的发生**（机制由 keyset 分页 + 单页驻留 + 单测支撑，见下方第 7 条），并修掉一处只在活体才暴露的下载 500（第 12 条） | 1d |
-| **P7** 前端 | 8 个页面 + 租户切换器 + owner 可见性 + 进度时间线组件 | 浏览器实测完整链路：注册→上传证书→导入 PPID→申请→进度→导出 | 2d |
+| **P7** 前端 **（已完成，浏览器实测全绿）** | `web/` 共 27 个源文件：Vite 6 + Vue 3.5 + TS 5.7 + Pinia + Element Plus 2.9（全量引入 + zh-cn locale）、hash 路由 + 全局守卫、`api/http.ts`（统一响应解析、会话令牌走请求头、`download`+`saveBlob` 二进制出口）、`api/token.ts`（localStorage 存取）、`stores/session.ts`（profile/租户列表/owner 位一律每次回服务端读，不缓存权限）、`dict.ts`（六套状态字典 + 未知值 fallback 原样显示）、`utils/format.ts`（`fmtDateTime` 按固定位截取而不是 `new Date()` 解析）、外壳 `AppLayout.vue`（租户切换器 + owner 标记 + "当前账号不属于任何租户"提示）、十个页面：登录/注册 + PPID 池、发起申请、申请列表、申请详情（五阶段进度时间线 + 分片明细 + 人工重放）、Token 结果（筛选/导出/销毁）、成员管理、租户设置、MFI 凭证；单进程部署：`mfi-service/pom.xml` 新增**按文件自动激活**的 `web-ui` profile，`web/dist/index.html` 存在时由 `maven-resources-plugin` 在 `process-resources` 把产物拷进 `classes/static`；**活体实测倒逼出的五处后端/前端修正**：`sa-token.is-read-cookie: false`、`session.expired` + 外壳跳转登录页、`NoResourceFoundException`→404（不再按 500 打全栈）+ `index.html` 内联 SVG 图标、`CredentialView` 的 PEM 落 DOM 拆分、12 个 PO 的 `create_time`/`update_time` 写策略 `FieldStrategy.NEVER` | **已验证**：`pnpm typecheck`（vue-tsc）与 `pnpm build` 通过，产物 `index-Bdmu5e66.js` / `index-gP46p-Fd.css`（gzip 368 KB / 49 KB），且实测浏览器加载的就是这两个最终文件名；`mvn -o -q -DskipTests compile` 与 `mvn -o -q -am -pl mfi-service install -DskipTests` 全绿，
+DAO 写策略改动之后 `mvn -o -am -pl mfi-service test` 复跑仍然全绿（service 153 项 + dao + apple，BUILD SUCCESS）；**单进程实测**：`GET /` 200 且带内联图标、带 hash 的静态资源 200、`GET /favicon.ico` 404 且运行日志 ERROR 增量为 0（改前是被兜底 advice 记成"未预期的系统异常" + 全栈）；**对真实 MySQL + Redis + RabbitMQ + 自签 CA 的 two-way TLS 桩把 §9 的完整链路在浏览器里点通**（两个浏览器分别登录两个身份）：注册新租户→上传证书（三道校验的失败路径与成功路径各走一遍，替换后指纹/Subject/到期日/版本 v1→v2 全部刷新、MFI 客户端重建）→租户设置里把 BaseURL 改指桩→连通性自检 `reachable`→Excel 导入（含故意放错的 0 量行：逐行报错且 `insertedRows=0`，改正后入库、池子总览与导出对得上）→发起申请（分配预览与实际分配同一口径、幂等键换新、余量不足时先给横幅不落单）→五阶段推进到**成功**（详情时间线逐阶段 `reached/succeeded`、下载与注册时刻落上、两张 token 各得一个 SN）→Token 列表按状态筛选→异步导出（任务轮询到 SUCCESS 后 Blob 落地、文件名按 RFC 5987 还原）→owner 销毁（**单号输错即中止且苹果侧零调用**，原样二次确认后 6 条落 DESTROYED）→`REGISTERFAIL` 单走到**已终止**并在进度页人工重放→成员邀请与启停→**非 owner 身份**（同一账号在隔壁租户是 owner、在本租户是普通成员）下凭证/租户配置/成员移除/owner 转让/销毁五个入口全部不可见或 403；**会话与越权边界**：刷新后仍在登录态、令牌被服务端判失效时业务码 `A0401` 触发 `#/login?redirect=/ppid` 且重新登录后回到原页、主动退出不带 redirect；关掉 cookie 通道后 `document.cookie` 实测为空字符串（改前删掉 localStorage 旧会话仍能靠 cookie 续命）；**红线复看**：页面 DOM 与可访问性树里 `bodyHasPem=false`、token 列表只有状态与 SN 而无 `encodedToken`/`secretKey`/`authEntityId`/`accessoryUuid`，运行日志 `grep` 到 ERROR 0 条、WARN 0 条、`BEGIN CERTIFICATE`/`PRIVATE KEY`/`==> Parameters` 各 0 条、异常栈 0 条，浏览器控制台除两次**故意触发的** HTTP 400 与 harness 自己的 file-chooser 提示外无 error；**时间戳缺陷的活体复验**：修 DAO 写策略后，编辑 PPID 备注使更新时间由 `12:25:40` 走到 `12:50:54`，新单 `A261012-5SCWBREF` 的创建/更新为 `12:52:12`/`12:52:14`（修前该类读改写路径会把更新时间冻在创建时刻）；未验证项：真实苹果（P8b 阻塞）、以及因内置浏览器无 viewport 而无法做的像素级点击与视觉走查（按钮一律按 DOM 事件触发，布局只做了文本层核对） | 2d |
 | **P8a** 本地安全验收 | `docs/mfi-token-flow.md`、日志脱敏复查、跨租户渗透自测、部署说明、§11 最终验收清单逐项 | 除"真证书联调"外的全部验收项通过 | 1d |
 | **P8b** 真证书联调（**阻塞**） | 拿厂商真实证书后验 §13.2 列出的 5 项未验证风险：真实证书链与 CN 校验、`technology` 取值接受度、真实限流阈值、响应字段与文档一致性、苹果侧 PPID 配额 | 不在本次可交付范围，需外部输入才能启动 | 待定 |
 
@@ -749,6 +757,58 @@ MFI_SERVER_PORT                    # 默认 8090
     因为应用的工作目录是 `mfi-service/` 而验收脚本从仓库根跑，相对路径会在两处各长出一个目录、"产物只落在配置目录"
     那条断言直接失真。
 
+### P7 编码期偏离与取舍
+
+1. **`updateById` 把旧时间戳回写，冻结了全系统的"更新时间"（活体浏览器实测才暴露，DAO 层缺陷）**：所有表的时间列都是
+   `DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP`，且刻意不装 `MetaObjectHandler`（时间归库管，
+   应用不参与）。但 MyBatis-Plus 默认 NOT_NULL 写策略下，"先 `selectOne` 读出行 → 改几个字段 → `updateById`"这条最常见的
+   读改写路径会把**刚读出来的 `update_time` 原值**一起拼进 `SET`，显式赋值让 MySQL 不再触发 `ON UPDATE`，于是更新时间永远
+   停在上一轮的值。前端第一次把这张表画出来就露馅了：替换凭证后版本从 v1 变成 v2，时间还是十分钟前的。修法是在 12 个 PO 的
+   `createTime`/`updateTime` 上统一声明 `@TableField(insertStrategy = NEVER, updateStrategy = NEVER)`——插入交给列默认值，
+   更新绝不参与，谁也不必再记得"改之前先把时间戳抹掉"。核对过全仓库没有任何一处给这两个字段赋值，所以这条是纯收敛。
+   受影响的是每一张要在页面上显示更新时间的表（PPID、申请单、导出任务……），不只是凭证。
+2. **保存后仍要回读一次元数据**（与第 1 条同源，但不是同一件事）：`CredentialService.replace` 返回的是内存里刚拼出来的 VO，
+   `update_time` 由库填，内存对象上是 null。修 DAO 只让库里的值正确，响应体依然给不出时间，所以 `CredentialView` 在成功提示之后
+   再 `load()` 一次。凡是"入库后立刻要展示库侧默认值"的页面都按这个约定写，别指望写接口的响应。
+3. **hash 路由**：单进程同时托管静态资源与 API，不想为一个 SPA 再加一条"找不到文件就回 index.html"的转发规则（那条规则
+   一旦写错就会把 `/api/**` 的 404 也吞成 HTML）。`createWebHashHistory` 之后刷新 `#/applications/A261012-xxxx` 永远不 404，
+   `web-ui` profile 只做纯拷贝，不需要任何后端配合。
+4. **Element Plus 全量引入**：不配 `unplugin-vue-components`/`unplugin-auto-import`。代价是首包 1.13 MB（gzip 368 KB），
+   换来的是零按需配置、零"某个组件没被自动注册"的排查。这是内网控制台，不是公网落地页。
+5. **会话令牌放 localStorage，并且只走请求头**：`is-read-cookie: false` 是这条能成立的前提。sa-token 默认会下发一个
+   **不带 HttpOnly** 的同名 cookie，同时也会从 cookie 里读会话——实测把 localStorage 清空之后旧会话照样能用，浏览器还会
+   自动带着它发请求，等于白送一个 CSRF 面。关掉读写之后 `document.cookie` 为空，出口只剩请求头，`<a href>` 因此带不上
+   会话，所有下载都走 `download()`+`saveBlob`。令牌可被脚本读到的风险（XSS）是明知故选的：本服务没有同源第三方脚本，
+   而凭证/销毁这些动作在 §8 一律再要求服务端侧的 owner 复核与单号二次确认，权限判定从不信前端。
+6. **过期跳转按业务码而不是 HTTP 状态**：`A0401` 才是"身份不成立"，HTTP 401 还共用着 `A0402`（账号或密码错），
+   按状态码判定会在登录页把人踢下线并循环跳转。`session.expired` 只做一次信号，外壳 `AppLayout` 的 watch 消费掉它并
+   `router.replace('/login?redirect=<原路径>')`；主动退出走 `onLogout`，不写 redirect，否则用户点登录页返回会被弹回原地。
+7. **凭证上传的明文只活在内存里（一处真实缺陷，必须留档）**：第一版把证书和私钥塞进响应式表单、由 `el-input type=textarea`
+   渲染，**可访问性树会把 textarea 的值原样暴露给工具层**，于是私钥文本进了那次会话的工具输出。改成两条互斥路径：文件选择走
+   只存在于内存的 `fromFile`（渲染只显示文件名与大小），粘贴走 `v-if="pasteOpen"` 的临时框，提交成功即刻擦净并关闭弹窗，
+   `onPick` 里连 `input.value` 一起清。要说清事实：那次涉及的material是本机 `scripts/gen-dev-certs.sh` 生成、写在 gitignored
+   `.dev-certs/` 里的自签开发证书（`tenant-a.pk8.key`），不是厂商材料，但它确实出过一道工具输出——按 §6.3 的口径这属于
+   要上报的泄露事件，P8a 把它记进 §6.4，并把"任何页面不得渲染私钥文本"列为复查项。
+8. **favicon 用内联 SVG，后端补一条 404 处理**：浏览器无条件索要 `/favicon.ico`，而兜底 `@ExceptionHandler(Exception.class)`
+   把它记成"未预期的系统异常" + 全栈，每开一个页面就脏一条 ERROR。加 `NoResourceFoundException`→404 空响应，图标用
+   `index.html` 里的 data-URI SVG——既不为一个图标往**公开仓库**放二进制文件，也不再产生那次请求。
+9. **进度时间线没有独立组件文件**：§9 里写的"进度时间线组件"落在 `ApplicationDetailView.vue` 内。目前只有这一处用它，
+   按 §"不提前抽象"的约定先不外提，等第二个消费方出现再抽。
+10. **状态字典带 fallback**：`dict.ts` 的 key 必须是后端枚举名，列表里遇到未知值原样显示而不是渲染空白。后端加状态时
+    前端只是少个中文和配色，不会整页看不见数据。
+11. **`pnpm.onlyBuiltDependencies: [esbuild, vue-demi]`**：pnpm 10 默认不执行依赖的安装期构建脚本，esbuild 不落地二进制
+    则 vite 起不来。这一条是环境事实，不是偏好。
+12. **`web-ui` profile 按文件激活而不是属性**：`${basedir}/../web/dist/index.html` 不存在时 profile 不激活，后端构建与
+    `mvn test` 完全不受前端影响——CI 上没跑 `pnpm build` 也不该失败。日常只改前端时刷新一次
+    `mvn -o -q -pl mfi-service process-resources` 即可，Spring 从 `classes/static` 取文件、不必重启；该目录会累积旧 hash
+    的产物，无害且 `target/` 本就不入库。
+13. **工具侧的两条实测限制（不是产品问题，但影响"怎么算验过"）**：本机内置浏览器连接器在没有可视视口时指针点击会直接报
+    `NATIVE_BROWSER_VIEWPORT_UNAVAILABLE`，本轮所有按钮操作都是 DOM 事件（`el.click()`），像素级点击与视觉走查没做；
+    `el-upload` 的 `<input type=file>` 是 `display:none`，不进可访问性树就点不到，需要先把它的 display 强制打开再喂文件。
+    另外隐藏页面里 Element Plus 弹窗的 **leave 过渡不会完成**，关掉的 `.el-dialog` 会以 `display:block` 残在 DOM 并带着旧文案，
+    因此按 `.el-message-box` 这类宽选择器操作有命中陈旧弹窗的风险——本轮就因此误重放过一次已终态的分片（无害且最终仍是 DEAD，
+    但要记下来：后续验收脚本必须用"当前可见且文案匹配"的双重条件定位）。
+
 ### 最终验收清单
 
 - [ ] 两个租户各用独立证书并发申请，数据、PPID、token 完全隔离
@@ -838,16 +898,14 @@ P5 的应对（已由用户选定）：
 
 ## 14. 下一步
 
-P0–P6 已交付并本机验收（§11）。P5 把五个阶段的队列、TTL→DLX 延迟回流、CAS 跃迁、重试与 DLQ、兜底扫描接成闭环；
+P0–P7 已交付并本机验收（§11）。P5 把五个阶段的队列、TTL→DLX 延迟回流、CAS 跃迁、重试与 DLQ、兜底扫描接成闭环；
 P6 把结果侧收口：SN 按"计数器粒度等于 SN 前缀粒度"的 Redis 号段生成、进度与结果的三个读接口、失败分片的人工重放、
 有界线程池的异步导出（产物含 token 原文，因此只认发起人），以及销毁未使用实体——本服务唯一一个"不可逆且把额度还给
-PPID"的入口。
+PPID"的入口；P7 补上前端与控制台，并第一次把 §8 的全部端点按真实顺序串起来——它确实找出了五个只有真点才暴露的问题
+（时间戳写回、cookie 会话通道、A0401 不跳转、favicon 打成 500、私钥进可访问性树），逐条记在 §11 的 P7 偏差里。
 
-接下来进入 **P7 前端**（§9）：Vue3 + Vite + TS + Pinia + Element Plus，八个页面 + 租户切换器 + owner 可见性 +
-进度时间线组件。构建产物由 `maven-resources-plugin` 复制进 `mfi-service` 的 `static/` 单进程部署，开发期 Vite proxy 到
-`localhost:8090`；本机 `npm` 已损坏，一律用 `pnpm`（§12 最后一条）。P7 的验收口径是浏览器实测完整链路
-（注册→上传证书→导入 PPID→申请→进度→导出→销毁），它会第一次把 §8 的全部端点按真实顺序串起来——P6 那处
-"全局响应包装 × 局部返回类型"的打架（§11 的 P6 偏差第 12 条）只在真点下载时才暴露，前端联调就是这类接线问题的
-下一个暴露面。P8a 再按 §11 最终验收清单逐项复跑，包括 P5 欠下的那条：把本机共享的 RabbitMQ 重启一次，
-证明拓扑重声明与兜底扫描自愈真的成立。
+接下来是 **P8a 本地安全验收**：按 §11 最终验收清单逐项复跑，写 `docs/mfi-token-flow.md` 与部署说明，做一次日志脱敏
+复查与跨租户渗透自测（含 P7 新记的"任何页面不得渲染私钥文本"），并补掉 P5 欠下的那条：把本机共享的 RabbitMQ 重启一次，
+证明拓扑重声明与兜底扫描自愈真的成立。P8b 真证书联调仍阻塞在外部输入（厂商真实客户端证书），§13.2 列出的 5 项风险在
+拿到证书之前无法验证。
 编码过程中的偏离会在本文档同步更新。
