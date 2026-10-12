@@ -16,9 +16,12 @@ public enum TokenStatus {
 
     /**
      * 仅未使用的实体可被苹果销毁。
+     *
+     * <p>SCRAPPED 不在其列：那只是本系统自己打的报废标记，苹果侧到底还绑没绑配件无从确认，
+     * 所以对苹果发起销毁只对 ISSUED 的行（见 {@code TokenMapper#selectDestroyCandidates}）。
      */
     public boolean destroyable() {
-        return this == ISSUED || this == SCRAPPED;
+        return this == ISSUED;
     }
 
 }

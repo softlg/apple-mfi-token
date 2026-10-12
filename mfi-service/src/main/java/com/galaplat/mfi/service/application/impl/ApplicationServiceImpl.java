@@ -27,6 +27,7 @@ import com.galaplat.mfi.dao.mapper.TenantMapper;
 import com.galaplat.mfi.dao.mapper.UserMapper;
 import com.galaplat.mfi.model.request.ApplyCreateRequest;
 import com.galaplat.mfi.model.request.ApplicationPageRequest;
+import com.galaplat.mfi.model.vo.ApplicationRetryVo;
 import com.galaplat.mfi.model.vo.ApplicationShardVo;
 import com.galaplat.mfi.model.vo.ApplicationVo;
 import com.galaplat.mfi.model.vo.ApplySubmitVo;
@@ -36,6 +37,7 @@ import com.galaplat.mfi.mq.ShardMessageProducer;
 import com.galaplat.mfi.mq.StageMessage;
 import com.galaplat.mfi.security.TenantAccess;
 import com.galaplat.mfi.service.application.ApplicationService;
+import com.galaplat.mfi.service.application.ApplicationVoConverter;
 import com.galaplat.mfi.service.ppid.PpIdService;
 import com.galaplat.mfi.service.tenant.TenantConfigService;
 import lombok.extern.slf4j.Slf4j;
@@ -303,7 +305,103 @@ public class ApplicationServiceImpl implements ApplicationService {
                 .orderByDesc(ApplicationPO::getId);
         IPage<ApplicationPO> page = applicationMapper.selectPage(
                 Page.of(request.getPageNum(), request.getPageSize()), filter);
-        return PageResult.of(page, ApplicationServiceImpl::toVo);
+        return PageResult.of(page, ApplicationVoConverter::toVo);
+    }
+
+    /**
+     * 人工重放。定位是"死信需要人工介入"的那一条出口，所以只碰 DEAD：成功、进行中和退避等待中的分片
+     * 都留在原地——把它们一起改只会让同一跳出现两个消费者。
+     *
+     * <p>阶段保持原样、{@code apple_request_uuid} 保留，停在 APPLY 的分片靠已有的 request id 短路，
+     * 不会向苹果重复要一批 token；不重放申请本身，也就不会再扣一次额度。
+     *
+     * <p>任何已登录成员都可重放：它消耗的是本租户已经扣过额度的分片，不属于不可逆或高影响操作，
+     * 与发起申请同级。
+     */
+    @Override
+    public ApplicationRetryVo retry(String applicationNo) {
+        long tenantId = TenantAccess.requireTenantId();
+        long userId = TenantAccess.requireUserId();
+        String no = requireText(applicationNo, "申请单号");
+        ApplicationPO application = applicationMapper.selectOne(Wrappers.<ApplicationPO>lambdaQuery()
+                .eq(ApplicationPO::getTenantId, tenantId)
+                .eq(ApplicationPO::getApplicationNo, no));
+        if (application == null) {
+            throw new BizException(ErrorCode.BIZ_REJECTED, "申请单不存在，或不属于当前租户");
+        }
+
+        List<ApplicationPpidPO> dead = shardMapper.selectDeadByApplication(tenantId, application.getId());
+        if (dead.isEmpty()) {
+            // 没有失败分片就不是错误：按钮点第二次、或分片已被兜底扫描捞回，都该安静地返回空
+            log.info("人工重放无事可做，没有终态失败分片: tenantId={}, applicationNo={}", tenantId, no);
+            return retryVo(no, List.of());
+        }
+
+        String operator = applicantName(userId);
+        List<ApplicationPpidPO> replayed = transactionTemplate.execute(status -> {
+            List<ApplicationPpidPO> done = new ArrayList<>(dead.size());
+            for (ApplicationPpidPO shard : dead) {
+                if (shardMapper.resetForRetry(tenantId, shard.getId()) == 0) {
+                    log.warn("分片已不在终态失败，跳过重放: shardId={}, stage={}", shard.getId(), shard.getStage());
+                    continue;
+                }
+                writeReplayLog(tenantId, application.getId(), userId, operator, shard);
+                done.add(shard);
+            }
+            if (!done.isEmpty()) {
+                applicationMapper.reopen(tenantId, application.getId());
+            }
+            return done;
+        });
+        if (replayed == null || replayed.isEmpty()) {
+            return retryVo(no, List.of());
+        }
+
+        // 复位落库并提交之后才投递。这里不挂 AFTER_COMMIT 回调：事务已经返回，投递失败仍有兜底扫描兜着，
+        // 因为 resetForRetry 把 next_execute_time 清成了 null，而扫描正是按这一列捞 PENDING 的。
+        String traceId = no + "#retry";
+        replayed.forEach(shard -> messageProducer.publishStage(new StageMessage(tenantId, application.getId(),
+                shard.getId(), shard.getStage(), traceId)));
+        log.info("人工重放已入队: tenantId={}, applicationNo={}, operator={}, shards={}",
+                tenantId, no, operator, replayed.size());
+        return retryVo(no, replayed);
+    }
+
+    /**
+     * 重放留痕记的是"谁在什么时候把哪一片从死信里捞回来，原来的死因是什么"。
+     * 复位会把 {@code last_error} 清空，所以这一份必须在复位之后由内存快照写出来。
+     */
+    private void writeReplayLog(long tenantId, long applicationId, long userId, String operator,
+                                ApplicationPpidPO shard) {
+        OperationLogPO entry = new OperationLogPO();
+        entry.setTenantId(tenantId);
+        entry.setApplicationId(applicationId);
+        entry.setShardId(shard.getId());
+        entry.setAction(OperationAction.RETRY.name());
+        entry.setOperatorUserId(userId);
+        entry.setOperatorName(operator);
+        entry.setQuantity(shard.getAllocateCount());
+        entry.setDetail("人工重放阶段 " + shard.getStage() + "，原失败原因："
+                + (hasText(shard.getLastError()) ? shard.getLastError().trim() : "无留档"));
+        operationLogMapper.insert(entry);
+    }
+
+    private static ApplicationRetryVo retryVo(String applicationNo, List<ApplicationPpidPO> replayed) {
+        ApplicationRetryVo vo = new ApplicationRetryVo();
+        vo.setApplicationNo(applicationNo);
+        vo.setReplayedCount(replayed.size());
+        vo.setShards(replayed.stream().map(ApplicationServiceImpl::replayedShardVo).toList());
+        return vo;
+    }
+
+    /** 返回复位后的状态，而不是复位前读到的快照，免得前端还要自己推算 */
+    private static ApplicationShardVo replayedShardVo(ApplicationPpidPO shard) {
+        ApplicationShardVo vo = ApplicationVoConverter.toShardVo(shard);
+        vo.setStageStatus(StageStatus.PENDING.name());
+        vo.setRetryCount(0);
+        vo.setLastError(null);
+        vo.setNextExecuteTime(null);
+        return vo;
     }
 
     private static String parseStatus(String raw) {
@@ -326,36 +424,7 @@ public class ApplicationServiceImpl implements ApplicationService {
         vo.setPpidCount(application.getPpidCount());
         vo.setDuplicated(duplicated);
         vo.setShards(shardMapper.selectByApplication(application.getTenantId(), application.getId()).stream()
-                .map(ApplicationServiceImpl::toShardVo).toList());
-        return vo;
-    }
-
-    private static ApplicationVo toVo(ApplicationPO row) {
-        ApplicationVo vo = new ApplicationVo();
-        vo.setApplicationNo(row.getApplicationNo());
-        vo.setProductModel(row.getProductModel());
-        vo.setSpu(row.getSpu());
-        vo.setAppleTechnology(row.getAppleTechnology());
-        vo.setApplyQuantity(row.getApplyQuantity());
-        vo.setPpidCount(row.getPpidCount());
-        vo.setTokenCount(row.getTokenCount());
-        vo.setStatus(row.getStatus());
-        vo.setFailReason(row.getFailReason());
-        vo.setApplicantName(row.getApplicantName());
-        vo.setCreateTime(row.getCreateTime());
-        vo.setFinishTime(row.getFinishTime());
-        return vo;
-    }
-
-    private static ApplicationShardVo toShardVo(ApplicationPpidPO row) {
-        ApplicationShardVo vo = new ApplicationShardVo();
-        vo.setShardId(row.getId());
-        vo.setPpid(row.getPpid());
-        vo.setAllocateCount(row.getAllocateCount());
-        vo.setStage(row.getStage());
-        vo.setStageStatus(row.getStageStatus());
-        vo.setRetryCount(row.getRetryCount());
-        vo.setLastError(row.getLastError());
+                .map(ApplicationVoConverter::toShardVo).toList());
         return vo;
     }
 

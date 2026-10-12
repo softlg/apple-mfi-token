@@ -47,6 +47,18 @@ public interface TokenFileMapper extends BaseMapper<TokenFilePO> {
     List<TokenFilePO> selectByShard(@Param("tenantId") long tenantId, @Param("shardId") long shardId);
 
     /**
+     * 整张申请单的文件明细，结果页按 PPID 分组展示"哪份文件下了多少 token、什么时候下的"。
+     * 分片顺序在前端由 shardId 归组，这里只按登记顺序返回。
+     */
+    @Select("""
+            select * from t_token_file
+            where tenant_id = #{tenantId} and application_id = #{applicationId} and deleted = 0
+            order by id asc
+            """)
+    List<TokenFilePO> selectByApplication(@Param("tenantId") long tenantId,
+                                          @Param("applicationId") long applicationId);
+
+    /**
      * 标记下载成功并写入 token 数。条件里排除已 SUCCESS 的行，重复下载只会更新 0 行而不会把
      * download_time 抹成新的一次，便于判断"这一份是什么时候拿到的"。
      */

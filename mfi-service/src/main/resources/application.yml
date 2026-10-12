@@ -117,6 +117,17 @@ mfi:
     # 租户并发额度占不到时的重排间隔，这段等待不消耗重试次数
     gate-retry-millis: 30000
 
+  # 异步导出。产物含 token 原文与密钥，目录必须本服务独占且不进版本库
+  export:
+    dir: ${MFI_EXPORT_DIR:./export}
+    page-size: 1000
+    max-rows: 100000
+    worker-size: 2
+    queue-capacity: 50
+    # 停在该时间以外的 PROCESSING 任务判定为执行进程已不在，置失败
+    stale-timeout-minutes: 30
+    scan-interval-millis: 60000
+
 springdoc:
   api-docs:
     path: /v3/api-docs

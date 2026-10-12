@@ -2,6 +2,8 @@ package com.galaplat.mfi.model.vo;
 
 import lombok.Data;
 
+import java.time.LocalDateTime;
+
 /**
  * 申请单的一个 PPID 分片。
  */
@@ -23,5 +25,8 @@ public class ApplicationShardVo {
     private Integer retryCount;
 
     private String lastError;
+
+    /** 下一次执行时间：PENDING 且晚于当前时间就是"在延迟队列里等苹果生成文件" */
+    private LocalDateTime nextExecuteTime;
 
 }

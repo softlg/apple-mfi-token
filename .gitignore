@@ -31,6 +31,9 @@ secrets/
 .dev-certs/
 # python 验收脚本的字节码缓存
 __pycache__/
+# 导出产物（含 token 原文与密钥）绝不入库。必须根锚定：不带斜杠的 export/ 会连源码包 service/export 一起忽略
+/export/
+/mfi-service/export/
 # 本地覆盖配置可出现在任意模块，根锚定的 src/... 路径匹配不到 mfi-service/src/...
 **/application-local.yml
 **/application-local.yaml

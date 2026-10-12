@@ -182,4 +182,42 @@ public interface ApplicationPpidMapper extends BaseMapper<ApplicationPpidPO> {
     List<Map<String, Object>> selectStageSummary(@Param("tenantId") long tenantId,
                                                  @Param("applicationId") long applicationId);
 
+    /**
+     * 人工重放的候选：只捞 DEAD（终态失败）。
+     *
+     * <p>成功、进行中与等待中的分片都不在内——重放的功能定位是"死信需要人工介入"的那一条出口，
+     * 把还在推进的分片一起改只会造成同一跳两个消费者。
+     */
+    @Select("""
+            select id, application_id, ppid, allocate_count, stage, stage_status, retry_count,
+                   apple_request_uuid, last_error
+            from t_application_ppid
+            where tenant_id = #{tenantId} and application_id = #{applicationId} and deleted = 0
+              and stage_status = 'DEAD'
+            order by id asc
+            """)
+    List<ApplicationPpidPO> selectDeadByApplication(@Param("tenantId") long tenantId,
+                                                    @Param("applicationId") long applicationId);
+
+    /**
+     * 重放：DEAD 按当前阶段放回 PENDING，重试计数归零。
+     *
+     * <p>{@code last_error} 与 {@code next_execute_time} 一起清空：留着旧的死因会让下一次成功看起来仍然可疑，
+     * 而 {@code next_execute_time = null} 正是"待投递"的既有语义（申请事务插入的初始分片同样是 null），
+     * 万一这次人工投递失败，兜底扫描会按这一列把它补上，不会静默丢单。
+     *
+     * <p>阶段不变、{@code apple_request_uuid} 保留：停在 APPLY 的分片重放时靠已有的 request id 短路，
+     * 不会向苹果重复要一批 token——这是替代 MES 那 11 个补偿端点的关键，而不是一键重新申请。
+     */
+    @Update("""
+            update t_application_ppid
+            set stage_status = 'PENDING',
+                retry_count = 0,
+                last_error = null,
+                next_execute_time = null
+            where tenant_id = #{tenantId} and id = #{shardId} and deleted = 0
+              and stage_status = 'DEAD'
+            """)
+    int resetForRetry(@Param("tenantId") long tenantId, @Param("shardId") long shardId);
+
 }

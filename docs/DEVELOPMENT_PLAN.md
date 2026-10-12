@@ -257,7 +257,16 @@ t_operation_log     id, tenant_id, application_id, action, operator_user_id,
 `[P3 期间的修正]` 原计划写的是 `mfi:sn:{tenantId}:{ppid}:{yyyyMMdd}`（照抄 MES）。但本仓库 `t_ppid` 的唯一键是
 `uk_ppid_tenant_ppid_spu(tenant_id, ppid, spu)`，也就是**同一个 PPID 允许挂多个 SPU**；取号 key 不带 `spu` 就会让两个
 SPU 共用一条计数器，各自批量取号后 `SnUtil` 前缀相同、序号互相跳过，跨厂商对账时无法解释。因此 key 必须补上 `spu` 段，
-与唯一键的粒度对齐。P6 落 SN 时按这条实现。
+与唯一键的粒度对齐。
+
+`[P6 期间的再修正]` 上面那条推理只解决了"跳号难解释"，代价却是**重号**：SN 格式（企业段 + PPID 后 6 位 + 年字母 + MMDD
++ 4 位流水）里根本没有 SPU 段，按 `spu` 拆计数器等于让同一 PPID 下的两个 SPU 各自从 0001 开始，编出两串完全相同的 SN。
+重号比断号严重得多——厂商拿同一串 SN 刷两件产品时谁都追溯不了，而断号只影响对账观感。最终实现因此把 key 收成
+`mfi:sn:{tenantId}:{前缀本身}`（`SnAllocator.KEY_FORMAT`），**计数器粒度严格等于 SN 前缀粒度**，同前缀下的多个 PPID/SPU
+共用一条连续号段；日期段本身就在前缀里，所以 key 不需要额外的 `yyyyMMdd` 段，TTL 只要长过一天（留 7 天便于排障）。
+断号仍然存在：号段在 Redis 占住之后、落库之前进程死掉，这段号作废且不回收——这是"宁可断号也不重号"的取舍。
+活体证据见 §11 的 P6 行：本轮三张测试单的 PPID 后 6 位同为运行时间戳、SN 前缀完全相同，实测号段 `1-6` 与 `7-1206`
+连续推进，1206 个序列号互不重复。
 
 ---
 
@@ -290,7 +299,10 @@ MfiTokenClient client = mfiClientFactory.getClient(tenantId);
 
 ### 6.3 日志红线
 
-`auth_entity_id`、`secret_key`、`accessory_uuid`、PPID 全量列表一律不得出现在日志。MES 里有 `log.info("...: {}", JSON.toJSONString(...))` 直接打整个 token 列表的写法（如 `registerUsedAuthEntitiesBulk` 打 `authEntities`），移植时必须改为打数量与 ID 摘要。
+`auth_entity_id`、`secret_key`、`accessory_uuid`、`encoded_token`（token 原文）、PPID 一律不得出现在日志。MES 里有 `log.info("...: {}", JSON.toJSONString(...))` 直接打整个 token 列表的写法（如 `registerUsedAuthEntitiesBulk` 打 `authEntities`），移植时必须改为打数量与 ID 摘要。
+
+PPID 这一条按"单个也不落"执行，不做"只禁全量列表"的宽解释：一次苹果调用就带一个 PPID，把它写进 INFO 等于每条阶段日志都带上租户的产品标识；
+读侧接口把 PPID 回给本租户看自己的数据不在此列。P6 移植 `MfiTokenClient` 时就是按这条把三个方法的 PPID 与实体清单从日志里摘掉的（§11 的 P6 偏差第 13 条）。
 
 红线不只约束自己写的日志语句，也约束**日志级别配置**：`logging.level.<mapper 包>: DEBUG` 会让 MyBatis 把每条 SQL 连同占位符实参整行输出，
 PPID、凭证密文、其他租户的数据都会随之落盘，而这类泄露不会出现在 code review 的 diff 里。P3 就踩过一次（§11 的 P3 偏差第 7 条），
@@ -442,10 +454,11 @@ POST   /api/applications/{no}/retry         人工重放（替代 MES 11 个补�
 余量预估不另开 `/api/quotas/remain`：P3 已交付的 `GET /api/ppid/available` 就是同一份语义（同一 service 方法、同一条 SQL），P4 直接复用，避免两个端点各算各的。
 
 ```
-GET    /api/tokens/page                     token 查询（状态/PPID/申请单筛选）
+GET    /api/tokens/page                     token 查询（状态/PPID/申请单/制造序列号筛选）
 POST   /api/tokens/export                   异步导出任务（CSV/XLSX）
-GET    /api/export-tasks/{id}               任务状态与下载链接
-POST   /api/tokens/destroy                  调苹果销毁未使用实体   [owner]
+GET    /api/export-tasks/{taskNo}           任务状态与下载路径（只认发起人，产物含 token 原文）
+GET    /api/export-tasks/{taskNo}/download  取产物字节（只认发起人）
+POST   /api/tokens/destroy                  调苹果销毁未使用实体   [owner + 单号二次确认]
 ```
 
 ---
@@ -551,7 +564,7 @@ MFI_SERVER_PORT                    # 默认 8090
 | **P3** PPID 池 **（已完成，本机验收 59/59）** | `PpIdMapper` 的 CAS 条件扣减/回补 SQL、`PpIdService`（分页 CRUD、停用作废、按型号+SPU 的余量预估）、Excel 导入/模板/导出（EasyExcel 4.0.3，列序即契约）、`/api/ppid` 9 个端点、`PageResult` 统一分页响应、`MaxUploadSizeExceededException` 全局处理；**测试资产**：`PpIdServiceTest`（12 项，含 `MockMultipartFile` + EasyExcel 真实读写往返）、`PpIdDeductConcurrencyTest`（对真实 MySQL 的并发 CAS，`MFI_IT_DB=1` 才启用）、`scripts/verify-p3.py`（活体验收） | **已验证**：`mvn -o -pl mfi-service -am test` 48/48（apple 12 + dao 9 + service 27，其中新增 12 项覆盖贪心拆分预估、`total<applied` 拒绝、"启用但余量为 0"拒绝、人工改总量必带 `applied_quantity` 快照条件、停用绝不 `deleteById`、导入行号/分块 500/`"100.0"` 放行/重导报"已存在"）；`MFI_IT_DB=1 mvn -o -pl mfi-dao -am test` 12/12，其中 3 项打真实 MySQL：**50 线程各扣 1 打到 40 份额度恰好 40 成功**、`applied=40 remaining=0` 且自动停用、余量 3 扣 5 不改一行、SQL 手工把停用行改回启用后再扣仍 0 影响；活体 59/59（真实 MySQL + Redis）：模板列序与 RFC 5987 文件名、重复 PPID+SPU 拒绝、分页四类筛选、预估与库内实际一致、非法文件逐行报错 `[3,4,5,6]` 且 `insertedRows=0`、1200 行整份入库后 stats 对齐、导出中文状态、**跨租户 8 项**（B 查不到/改不动/停不掉 A 的行、同 PPID+SPU 在 B 可独立导入、B 导出只含自己）、openapi 不泄漏库列名；`grep -ac 'P3-IMP' 运行日志` = 0 | 1d |
 | **P4** 申请同步段 **（已完成，本机验收 42/42）** | `ApplicationPO`/`ApplicationPpidPO`/`OperationLogPO` 与三个 Mapper、Flyway `V2__application_idempotency.sql`、`ApplicationService.submit`（一次事务内：凭证与上限前置 → 贪心拆分 → 逐份额度 CAS 扣减 → 落单落分片 → 留痕 → 登记消息）、`ShardMessageProducer`（AFTER_COMMIT 投递）、`RabbitTopology`（`mfi.token.normal` + `mfi.apply.queue` + JSON 转换器）、`POST /api/applications` 与 `GET /api/applications/page`；`PpIdService.planAllocation` 让预览与实际分配共用同一条池查询 | **已验证**：`mvn -o -pl mfi-service -am test` 57/57（新增 `ApplicationServiceImplTest` 9 项：**提交前一条消息都不许离开进程**、触发提交后回调才发且只发分片数那么多条、抢不到额度时不登记任何提交后回调、额度不足先拒后扣、上限闸门在池查询之前、证书过期快速失败、同 requestId 命中已有单且不开事务、唯一键撞库回滚后返回对手的单、脱离事务登记消息直接失败）；活体 42/42（真实 MySQL + Redis + RabbitMQ）：120 份在 100+30 的池上拆成 `[100,20]`、扣满的那份额度**余量归零自动停用**、库里分片 2 行合计 120、发起人/technology 快照落库、留痕只记数量不含 PPID 清单、**队列 `mfi.apply.queue` 实测正好多出 2 条**（rabbitmqctl 对账）、重复提交返回同一单号且 `applied_quantity` 不变、不带 requestId 的两次提交是两个单（NULL 不受唯一约束）、上限 3 挡掉 4 且额度分文未动、**两线程抢最后 1 份恰好成一个**且输家库里无单无扣减、跨租户 4 项、非法状态给 `A0400` 而不是 500、openapi 不泄漏 `idempotency_key`；运行日志 `grep -ac 'Preparing\|P4-BIG\|PRIVATE KEY'` 全为 0 | 1d |
 | **P5** 异步流水线 **（已完成，本机验收 54/54）** | `RabbitTopology`（`mfi.token.normal` + `mfi.token.delay` 两个 direct exchange、5 个阶段队列 + 1 个 DLQ、按 `delayTiers` 逐档位声明"队列级 TTL + 死信回流到本阶段队列"的延迟队列）、`PipelineNames`（档位毫秒数 ↔ 队列名互转，取整到不小于它的档位）、`StageRunner`（claim CAS → 回库读 → 早到重排 → 租户闸门 → 处理器 → 跃迁，先落库后投递）、`StageOutcome` 四态、5 个阶段处理器与 1 个 `PipelineListener`（5 个 `@RabbitListener`）、`MfiUtcTime`（苹果 UTC 时刻 + 1 分钟安全余量、解析失败回落 1h）、`TenantConcurrencyGate`、`ApplicationAggregator`（单条条件 UPDATE，终态不被迟到的聚合改回 RUNNING）、`PipelineScanner`（PROCESSING 超时复位 + PENDING 到点补发）、`DeadLetterListener`；**fixture 扩展**：`scripts/MfiStubServer.java` 增加五条剧情（正常/`WAIT`+`retry_download_after`/两小时后到货/403 永久拒/503 可恢复）与逐文件切片，`scripts/verify-p5.py`（54 项活体断言） | **已验证**：`mvn -o -pl mfi-service -am test` 全绿（apple 17 + dao 12（3 项真实库并发 IT 无 `MFI_IT_DB` 时跳过）+ service 94），其中 `StageRunnerTest` 16 项盯三条会直接造成重复调苹果/丢进度/耗死分片的规则（**领取返回 0 时回库读、闸门、处理器一条都不走到**、跃迁落库成功才投下一跳、等待原样回传 `retryCount` 而 RETRY 才 +1、早于计划时间重排、重试耗尽落 DEAD 并投死信），`PipelineNamesTest` 8 项（档位取整、非法档位、队列名稳定性），`PipelineScannerTest` 5 项（复位不加重试、补发只到点、跨租户），5 个处理器测试 29 项；**对真实 MySQL + Redis + RabbitMQ + 自签 CA 的 two-way TLS 桩跑 54 项活体断言，0 失败**（桩用 JDK `HttpsServer` 手写而不是计划里写的 WireMock，两-way TLS 与剧情都要自己控，200 行内可 review，且不必为 fixture 再引一套 Jetty）：7 个 token 走完 APPLY→FILE_NAME→FILE_CONTENT→REGISTER→FINISH 且桩给的 request id 落库、**逐文件推进**（两个文件各登记一次且 `token_count` 合计 7）、配件 UUID 逐行唯一（重试不换 uuid）、苹果 CRC32 原样落库、列序解析（Token ID 与 token 原文各归其列、base64 解出内容一致）、留痕 5 条前进记录且**不含 token 原文与 Token ID**、`retry_download_after` 到货前 PENDING + `next_execute_time` 在未来且 `retry_count=0`、`rabbitmqctl` 实测消息躺在 `mfi.delay.name.*` 档位队列里（TTL+死信回流闭环）、等待中的申请单读侧显示 RUNNING、桩侧对同一 PPID 只回一次"还在生成"、超过最长档位到货后重排且不消耗重试且时刻不倒退、**把分片伪造成 PROCESSING 后兜底扫描复位**且不加重试、在飞消息到货被 CAS 挡下（日志"判定为重复投递或已被推进"且分片没被改坏）、403 直接 DEAD 且只调苹果一次 + 死信被记成需要人工介入 + 全分片失败聚合 FAILED、503 按 10s/30s/1m 退避且总调用次数正好等于上限 3、**五个阶段队列与 DLQ 收口时全部 0 积压**、运行日志 `grep` 不到 token 原文/Token ID/`PRIVATE KEY`；本轮补掉一处真实缺陷（申请单在等待期间一直显示 PENDING，见下方第 7 条），并修掉 fixture 的 Token ID 复用问题（第 10 条） | 2d |
-| **P6** 结果与导出 | token 落库、SN 生成、状态聚合、异步导出任务、进度时间线查询、人工重放、销毁 | 时间线显示 5 阶段真实状态；导出 1 万条不 OOM；重放只作用于失败分片 | 1d |
+| **P6** 结果与导出 **（已完成，本机验收 93/93）** | SN：`SnUtil`（企业段 + PPID 后 6 位清洗 + 年字母 + MMDD，移植 MES 规则）+ `SnAllocator`（Redis `INCRBY` 一次占一段连续流水，**计数器 key 的粒度严格等于 SN 前缀粒度**，生产日按 `Asia/Shanghai` 取，4 位补零流水超上限只变长不截断）+ `FinishStageHandler` 只给缺号行发号并做收口两道校验；读侧：`ApplicationQueryService`（详情一次给全五阶段进度/分片明细/token 汇总/时间线）、`TokenQueryService`（分页 + 按 SN 反查，响应不含四个凭证列）、`GET /api/applications/{no}`、`/{no}/files`、`GET /api/tokens/page`；人工重放：`POST /api/applications/{no}/retry` + `ApplicationMapper.reopen`（只复位 FAILED/PARTIAL_FAILED 并抹掉上一轮死因）；异步导出：`ExportTaskPO`/`ExportTaskMapper`/`ExportProperties`/`ExportExecutorConfig`（有界线程池 + 队列满即拒）、`ExportServiceImpl`（keyset 分页、`max-rows` 触顶截断记 WARN、僵死 PROCESSING 扫描、产物目录约束、只认发起人）、`TokenExportRow`（十列列序即契约）、CSV 带 UTF-8 BOM / XLSX、RFC 5987 文件名、`GET /api/export-tasks/{taskNo}` 与 `/download`；销毁：`TokenDestroyRequest`/`TokenDestroyVo`/`TokenDestroyService` + `POST /api/tokens/destroy`（仅 owner、单号原样二次确认、只对 ISSUED 候选、按 PPID 归堆后每 100 个一批、被拒即停手、`hasMore` 如实回报）；**收尾修正**：`TokenMapper` 三处补 `status <> 'DESTROYED'`、`TokenStatus.destroyable()` 收窄到 ISSUED、`MfiTokenClient` 日志摘掉 PPID 与实体清单、`ResponseWrapAdvice` 不再包装 `ResponseEntity`；**fixture**：`scripts/MfiStubServer.java` 补 `unusedAuthEntities` 路由与 `REGISTERFAIL`/`DESTROYFAIL` 两条剧情 + `auth_entities`/`auth_entity_ids` 计数日志（一律不带 PPID），`scripts/verify-p6.py`（93 项活体断言） | **已验证**：`mvn -o -am -pl mfi-service test` 全绿（apple 17 + dao 12，其中 3 项真实库并发 IT 无 `MFI_IT_DB` 时跳过 + service 153），P6 新增/改写 58 项：`SnUtilTest` 9（逐条对着 MES 的 `generateSnPrefix` 断言，厂商产线已按这 16 位排产）、`SnAllocatorTest` 6（指定生产日期入参，跨年/跨月边界不依赖跑测试的当天）、`FinishStageHandlerTest` 9（可重入：只补空号行、绝不换掉已发出的 SN）、`ApplicationQueryServiceTest` 7、`TokenQueryServiceTest` 6、`ExportServiceImplTest` 9（翻页/截断/产物路径约束/只认发起人）、`TokenDestroyServiceTest` 10（**非 owner 在读任何数据之前就被拒**、二次确认必须逐字相同、按 PPID 归堆后切成 `[100,20,1]` 三批、一批被拒即停手并如实回已销毁数、留痕只记数量、`auth_entity_id` 为空判为数据损坏而非静默跳过）、`ResponseWrapAdviceTest` 2；**对真实 MySQL + Redis + RabbitMQ + 自签 CA 的 two-way TLS 桩跑 93 项活体断言，0 失败**：六个 token 走完五阶段且 SN 前段实测等于「E + PPID 后 6 位 + 年字母 B + MMDD」、4 位流水连续、互不重复，**三张单共用同一条计数器**（PPID 后 6 位同为时间戳 → 前段相同）并按 `1-6`、`7-1206` 连续推进不重号；详情一次给全五阶段（`reached=succeeded=1`、`dead=0`）、时间线五条 `STAGE_ADVANCE`、token 汇总按状态分组、两份文件行数之和=申请量且都 SUCCESS；token 分页六行含 PPID/SN/状态而**响应体内 `encodedToken`/`secretKey`/`authEntityId`/`accessoryUuid` 四个键一个都没有**、按 SN 反查命中 1 行；CSV 下载带 UTF-8 BOM、表头与十列列序逐字对齐、行数=1+6、产物里能看到 base64 的 token 原文与刚发出的 SN、库里只存 `E261012-xxxx.csv` 这一相对文件名；导出越权六项（隔壁租户读不到任务号也拿不到字节、同租户成员读不到 owner 的任务、成员可以自己发起、反过来 owner 也读不到成员的）；**1200 行的真实大单在 `page-size=100 / max-rows=1000` 下翻满 10 页并触顶截断**（`totalRows=1000` + WARN 日志 + XLSX 是合法 zip 容器 + 留痕 `EXPORT\|1000`）；`REGISTERFAIL` 剧情让分片 DEAD 在 REGISTER（退避一次后终态、桩侧正好被打了两次注册、六个 token 停在 ISSUED 且无 SN、聚合 FAILED 且写了 `fail_reason`、进度页 REGISTER `dead=1` 而 FINISH `reached=0`）；销毁的四道拒绝（非 owner HTTP 403、二次确认不一致、隔壁租户、确认位为空）之后**桩侧销毁调用增量为 0 且库里状态未变**；正常销毁 `selected=destroyed=6`、一个批次、六行 DESTROYED、留痕 `DESTROY\|6` 且 detail 里既无 PPID 也无 `AUTH`；对已注册的单候选为 0（不报错也不打苹果）、重复点击不再有调用；**销毁之后人工重放**这一节一次证完三处 mapper 修正：`replayedCount=1` 且分片回到 REGISTER/PENDING（`retry_count` 归零、`last_error` 清空）、单子被拉回进行中且上一轮 `fail_reason` 抹掉、走到 FINISH/SUCCESS、**桩侧注册调用没有新增**（已作废实体不再送苹果）、六行仍是 DESTROYED 且收口不把它们算成漏注册、**已销毁的实体一个序列号也没白占**（SN 仍为 0）、整单 SUCCESS + `finish_time` 重新落上 + `token_count=6`、无 DEAD 时重放是空操作而不是报错；日志红线八项（三份 PPID 明文、SN 前段、token 原文的 base64 前缀、`==> Parameters`、`PRIVATE KEY` 在运行日志里全部 grep 为 0，产物目录只含 `<任务号>.<后缀>`）；五个阶段队列与 DLQ 收口 0 积压；本轮把"导出 1 万条不 OOM"这条验收改成**低档位让翻页与截断都真的发生**（机制由 keyset 分页 + 单页驻留 + 单测支撑，见下方第 7 条），并修掉一处只在活体才暴露的下载 500（第 12 条） | 1d |
 | **P7** 前端 | 8 个页面 + 租户切换器 + owner 可见性 + 进度时间线组件 | 浏览器实测完整链路：注册→上传证书→导入 PPID→申请→进度→导出 | 2d |
 | **P8a** 本地安全验收 | `docs/mfi-token-flow.md`、日志脱敏复查、跨租户渗透自测、部署说明、§11 最终验收清单逐项 | 除"真证书联调"外的全部验收项通过 | 1d |
 | **P8b** 真证书联调（**阻塞**） | 拿厂商真实证书后验 §13.2 列出的 5 项未验证风险：真实证书链与 CN 校验、`technology` 取值接受度、真实限流阈值、响应字段与文档一致性、苹果侧 PPID 配额 | 不在本次可交付范围，需外部输入才能启动 | 待定 |
@@ -678,6 +691,64 @@ MFI_SERVER_PORT                    # 默认 8090
     `-Dfile.encoding=UTF-8`；`-pl mfi-service spring-boot:run` 之前不 `install` 会从本地仓库拿旧 `mfi-dao` jar，
     新增的 Mapper 方法在运行时表现为 `NoSuchMethodError`（P3 第 8 条同一个坑，这次栽在运行期而不是编译期）。
 
+### P6 编码期偏离与取舍
+
+1. **SN 计数器不按 `spu` 拆**（推翻 §5.6 里 P3 期间的那条修正，理由与活体证据都写在 §5.6）：SN 格式里没有 SPU 段，
+   按 SPU 拆 key 会把"跳号难解释"换成"重号"，而重号不可追溯、断号只是难看。最终粒度是 `租户 + SN 前段本身`。
+2. **宁可断号也不重号**：号段在 Redis 占住之后、落库之前进程死掉，这段号作废且不回收。FINISH 只给"还没有号"的行发
+   （`selectSnMissing`），所以这一跳天然可重入——重试时已落号的行不参与，最多给新出现的空行补号，绝不会把某一行已经
+   交给厂商的序列号换成另一个。`assignSn` 的 WHERE 再带一次"SN 为空"，并发下后写的一方直接落空而不是覆盖已发的号。
+3. **生产日按 `Asia/Shanghai` 而不是 JVM 默认时区**：容器里常是 UTC，月末与年末边界会差出一天，前缀跟着错一天。
+   日期做成可传入的包级方法只为测试能按指定日期断言跨年/跨月，不依赖跑测试的当天。
+4. **流水撞 4 位上限时变长而不是截断**（与 MES 一致）：只记 WARN。单个 PPID 单日产量超过 1 万说明位数方案本身要厂商
+   重新确认，服务端擅自截断成重复的 4 位是不可逆的数据事故。
+5. **导出状态词与 DDL 对齐**：`ExportTaskStatus` 用 `PENDING/PROCESSING/SUCCESS/FAILED`，与 `t_export_task.status`
+   的注释同一套词，不再引入 MES 的 0/1/2 数字态。任务号 `taskNo` 而不是自增 id 出现在 URL 与文件名里：id 会让"猜邻居的任务"
+   变成一次算术。
+6. **运行参数与业务配额分家**：`page-size`/`max-rows`/`worker-size`/`queue-capacity` 走 `mfi.export.*`（`ExportProperties`），
+   销毁的 500/请求与 100/批次是 `TokenDestroyService` 的 Java 常量，都**不进 `TenantConfigKey`**。一个租户把导出上限调到
+   千万行会耗尽整个进程的堆与磁盘，不可逆动作的单次批量也不是它能自行放开的东西。
+7. **"导出 1 万条不 OOM"没有按字面跑一万行**：改成把档位压到 `page-size=100 / max-rows=1000` 并用 1200 行的真实单，
+   让翻页与截断都在活体里真的发生（10 页取满、第 11 页不取、留下 WARN 与 `EXPORT|1000` 留痕）。内存结论由机制承担：
+   keyset 按主键前进，每轮只驻留一页 POJO 与刚转出的行，代价与总量无关；再加 `TokenMapper#selectExportPage` 的 SQL 形态
+   与 `ExportServiceImplTest` 的翻页/截断断言。真跑一万行只增加耗时，不增加证据。
+8. **导出产物只认发起人，而不是"同租户共享"**：产物里就是 `encoded_token` 与 `secret_key`，同租户的其他成员没有下载
+   别人导出结果的理由；`ExportTaskVo` 因此不回显 `filePath`，筛选条件快照也不回显（里面含 PPID）。下载按"配置目录 +
+   库里存的相对名"拼路径，先校验名字匹配 `^[A-Za-z0-9._-]{1,128}$` 再校验 `startsWith(base)`，所以产物目录必须是本服务
+   独占的（写进 `ExportProperties` 注释）。僵死的 PROCESSING 任务由定时扫描置败——执行进程重启或 OOM 后不能留下永远"进行中"
+   的任务与半个文件。
+9. **CSV 与 XLSX 共用同一份行模型**：`TokenExportRow` 的时间列是字符串而不是 `LocalDateTime`。两条写值路径格式化之后
+   输出完全一致，产物不再依赖某个转换器版本的默认格式；状态列输出枚举名而不是中文，因为这份文件是给机器与厂商对账用的，
+   中文改词会让对方的导入脚本静默错分类。
+10. **销毁的不可逆按四条形制兜住**：仅 owner；二次确认要**把申请单号原样再输一遍**（复选框挡不住误操作）；只对 ISSUED 的行
+    发起（注册过的实体在苹果侧已绑配件 UUID，销毁必被拒，与其等苹果报错不如在查询条件里就排除）；单次 500 个上限，剩下的
+    留给下一次点击（`hasMore` 为真）。逐批推进、每批成功即单独落库，一批被拒就停手不把剩下的继续送去——与
+    `RegisterStageHandler` 同一套纪律，剩下的还有机会救回来。半途失败如实回 `destroyed`/`hasMore`/`failReason` 而**不抛异常**：
+    那意味着"确实已经有一部分没了"，压成错误响应等于瞒住事实。苹果的返回文案可能把 PPID 原样抄回来，所以它只进响应、
+    不进日志与留痕；`IOException` 分支不重试，因为"请求已生效但响应丢了"与"请求没出去"在客户端分不出来。
+11. **`TokenStatus.destroyable()` 收窄到只剩 ISSUED**：SCRAPPED 只是本系统自己打的报废标记，苹果侧到底还绑没绑配件无从
+    确认。方法原本把 SCRAPPED 也算可销毁，与 `selectDestroyCandidates` 的 ISSUED-only 条件相互矛盾——读侧会显示"可销毁"
+    而提交后候选为空。两处必须同一口径，方法注释直接指向那条 SQL。
+12. **`ResponseWrapAdvice` 不能包装 `ResponseEntity`（活体第一轮 6 项失败的根因）**：导出下载声明
+    `ResponseEntity<Resource>`，被统一响应包装塞成 `R` 之后，按 Resource 选中的 `ResourceHttpMessageConverter` 在
+    `getContentLength` 处抛 `ClassCastException`——文件已写好、库里已是 SUCCESS，附件却下不来。这类"全局 advice ×
+    局部返回类型"的冲突单测看不见，只有真下载才发现；除修 `supports()` 之外补 `ResponseWrapAdviceTest` 两条把边界钉住。
+    另两处同期修正：`TokenMapper` 的 `selectUnregistered`/`countUnregistered`/`selectSnMissing` 各补一条
+    `status <> 'DESTROYED'`（少了它们，销毁过后的分片被重放时会把苹果侧已不存在的实体再注册一遍、收口校验把已作废的行
+    算成漏注册、以及给已作废的实体白吃一个序列号），`MfiTokenClient` 三个方法的日志摘掉 PPID 与实体清单（§6.3）。
+13. **桩侧调用次数只能按基线 + 增量对账**：桩进程跨多轮运行、日志是累加的，而新增的注册/销毁剧情日志按 §6.3 不带 PPID，
+    所以脚本无法把一次拒绝归到某张单上，只能在启动时取基线、之后算增量。这带来一个前提：兜底扫描会在应用启动后几秒内把
+    上一轮遗留的延迟消息消费掉，`run-p6.sh` 因此把计数基线放在"健康检查通过 + 30 秒消费窗口"之后，否则上一轮的两次注册
+    拒绝会被算进本轮，"苹果侧正好两次"这条断言就会飘。
+14. **`t_token.encoded_token` 的列注释与实现相反**（`V3__token_encoded_column.sql` 写"禁止进日志与导出列"）：前半句是
+    §6.3 红线、成立；后半句不成立——导出正是 token 原文的唯一出口（`TokenExportRow` 第 6 列）。为一句注释去改已应用的
+    迁移会让 Flyway 校验和与本地库不一致，不值得动迁移链；以 §6.3、本节与验收第 [5] 节为准，P8a 若重排基线 DDL 一并改掉。
+15. 工具侧新增两条（都不是产品问题）：`-pl mfi-service spring-boot:run` 之前必须先
+    `mvn -o -am -pl mfi-service install -DskipTests`，否则运行时用的是本地仓库里的旧 `mfi-dao`/`mfi-apple` jar，
+    新增的 Mapper 方法表现为 `NoSuchMethodError`（P5 第 12 条同一个坑）；`-Dmfi.export.dir` 要给**绝对路径**，
+    因为应用的工作目录是 `mfi-service/` 而验收脚本从仓库根跑，相对路径会在两处各长出一个目录、"产物只落在配置目录"
+    那条断言直接失真。
+
 ### 最终验收清单
 
 - [ ] 两个租户各用独立证书并发申请，数据、PPID、token 完全隔离
@@ -767,10 +838,16 @@ P5 的应对（已由用户选定）：
 
 ## 14. 下一步
 
-P0、P1、P2、P3、P4 已交付并本机验收（§11）。P4 把申请链路的同步段收口：一次事务里完成前置校验、贪心拆分、
-CAS 扣减与落单，消息只在提交后离开进程，重复提交由 `uk_application_idempotency` 兜住——并发抢最后 1 份额度
-实测恰好一个赢家、输家库里既无单也无扣减。接下来进入 **P5 异步流水线**：在 `mfi.token.normal` 上补齐后四个阶段的
-队列与 TTL→DLX 延迟回流、五个监听器、CAS 阶段跃迁与幂等 ACK、重试上限与 DLQ、租户并发闸门，以及**兜底扫描**
-（P4 的取舍是"提交后投递失败只记 ERROR"，必须由这里的扫描补发才成立）。P5 还要把 §13.2 的本地 mTLS 桩接进来，
-让五个阶段在自签证书下真的跑通一次。
+P0–P6 已交付并本机验收（§11）。P5 把五个阶段的队列、TTL→DLX 延迟回流、CAS 跃迁、重试与 DLQ、兜底扫描接成闭环；
+P6 把结果侧收口：SN 按"计数器粒度等于 SN 前缀粒度"的 Redis 号段生成、进度与结果的三个读接口、失败分片的人工重放、
+有界线程池的异步导出（产物含 token 原文，因此只认发起人），以及销毁未使用实体——本服务唯一一个"不可逆且把额度还给
+PPID"的入口。
+
+接下来进入 **P7 前端**（§9）：Vue3 + Vite + TS + Pinia + Element Plus，八个页面 + 租户切换器 + owner 可见性 +
+进度时间线组件。构建产物由 `maven-resources-plugin` 复制进 `mfi-service` 的 `static/` 单进程部署，开发期 Vite proxy 到
+`localhost:8090`；本机 `npm` 已损坏，一律用 `pnpm`（§12 最后一条）。P7 的验收口径是浏览器实测完整链路
+（注册→上传证书→导入 PPID→申请→进度→导出→销毁），它会第一次把 §8 的全部端点按真实顺序串起来——P6 那处
+"全局响应包装 × 局部返回类型"的打架（§11 的 P6 偏差第 12 条）只在真点下载时才暴露，前端联调就是这类接线问题的
+下一个暴露面。P8a 再按 §11 最终验收清单逐项复跑，包括 P5 欠下的那条：把本机共享的 RabbitMQ 重启一次，
+证明拓扑重声明与兜底扫描自愈真的成立。
 编码过程中的偏离会在本文档同步更新。

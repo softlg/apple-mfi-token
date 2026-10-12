@@ -11,6 +11,8 @@
 //   含 WAITLONG —— 第一次回"两小时后到货"，超过最长延迟档位，用来验"到货后发现自己还早到，再排一次"
 //   含 FAIL503  —— 申请接口回 5xx（退避重试，耗尽后进死信）
 //   含 FAIL403  —— 申请接口回 4xx（永久失败，直接进死信）
+//   含 REGISTERFAIL —— 批量注册整批回 403（token 停在"已下载未注册"，供人工重放与销毁取材）
+//   含 DESTROYFAIL —— 销毁接口整批回 403（人工销毁半途失败，调用方须停手并如实报已销毁数量）
 // 文件下载按清单切成的两份真实 xlsx，两份行数之和等于申请量，因此 token 行数可以和分片的
 // allocate_count 直接对账。
 import com.sun.net.httpserver.HttpExchange;
@@ -122,8 +124,18 @@ public class MfiStubServer {
         } else if (path.startsWith("/api/v1.0/external/authEntities/")) {
             fileRoute(exchange, path);
         } else if (path.startsWith("/api/v1.0/external/bulk/usedAuthEntities")) {
-            // 注册在苹果侧不可逆，桩只要回成功即可；失败剧情由 FILE/REGISTER 之外的阶段承担
+            // 注册在苹果侧不可逆，成功剧情只回空体；失败剧情由 PPID 名字触发，用来造"已下载未注册"的库存
+            String registerPpid = extract(body, "ppid");
+            int registering = countArrayItems(body, "auth_entities");
+            if (registerPpid != null && registerPpid.contains("REGISTERFAIL")) {
+                System.out.println("[stub] 故意拒绝注册: code=403 ids=" + registering);
+                sendJson(exchange, 403, "{\"error_code\":\"AUTH_ENTITY_REJECTED\",\"error_message\":\"配件 UUID 非法\"}");
+                return;
+            }
+            System.out.println("[stub] 受理注册: ids=" + registering);
             sendJson(exchange, 200, "{}");
+        } else if (path.startsWith("/api/v1.0/external/unusedAuthEntities")) {
+            destroyRoute(exchange, body);
         } else if (path.startsWith("/api/v1.0/external/status/")) {
             sendJson(exchange, 200, "{\"request_status\":\"COMPLETE\"}");
         } else {
@@ -153,6 +165,42 @@ public class MfiStubServer {
         REQUESTS.put(requestId, new Request(ppid, count, new AtomicInteger(), "TST" + sequence + "-"));
         System.out.println("[stub] 受理申请: ppid=" + ppid + " requestId=" + requestId + " count=" + count);
         sendJson(exchange, 200, "{\"request_id\":\"" + requestId + "\"}");
+    }
+
+    private static void destroyRoute(HttpExchange exchange, String body) throws IOException {
+        String ppid = extract(body, "ppid");
+        int ids = countArrayItems(body, "auth_entity_ids");
+        if (ppid == null || ids < 1) {
+            sendJson(exchange, 400, "{\"error_code\":\"INVALID_REQUEST\",\"error_message\":\"ppid 或实体清单为空\"}");
+            return;
+        }
+        if (ppid.contains("DESTROYFAIL")) {
+            // 销毁失败剧情：整批被拒，用来验调用方"停手并把已销毁的数量如实返回"
+            System.out.println("[stub] 故意拒绝销毁: code=403 ids=" + ids);
+            sendJson(exchange, 403, "{\"error_code\":\"AUTH_ENTITY_NOT_UNUSED\",\"error_message\":\"实体已被使用\"}");
+            return;
+        }
+        System.out.println("[stub] 受理销毁: ids=" + ids);
+        sendJson(exchange, 200, "{\"success_count\":" + ids + "}");
+    }
+
+    /** 数一段 JSON 数组的元素个数；只要量级，桩不解析 JSON。 */
+    private static int countArrayItems(String json, String field) {
+        String key = "\"" + field + "\"";
+        int at = json.indexOf(key);
+        if (at < 0) {
+            return 0;
+        }
+        int open = json.indexOf('[', at);
+        int close = open < 0 ? -1 : json.indexOf(']', open);
+        if (open < 0 || close < 0) {
+            return 0;
+        }
+        String inner = json.substring(open + 1, close).trim();
+        if (inner.isEmpty()) {
+            return 0;
+        }
+        return inner.split(",").length;
     }
 
     private static void fileRoute(HttpExchange exchange, String path) throws IOException {

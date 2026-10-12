@@ -7,6 +7,7 @@ import com.galaplat.mfi.config.PipelineProperties;
 import com.galaplat.mfi.credential.CredentialService;
 import com.galaplat.mfi.dao.entity.ApplicationPO;
 import com.galaplat.mfi.dao.entity.ApplicationPpidPO;
+import com.galaplat.mfi.dao.entity.OperationLogPO;
 import com.galaplat.mfi.dao.entity.TenantPO;
 import com.galaplat.mfi.dao.entity.UserPO;
 import com.galaplat.mfi.dao.mapper.ApplicationMapper;
@@ -18,6 +19,8 @@ import com.galaplat.mfi.dao.mapper.UserMapper;
 import com.galaplat.mfi.dao.tenant.TenantContext;
 import com.galaplat.mfi.dao.tenant.TenantPrincipal;
 import com.galaplat.mfi.model.request.ApplyCreateRequest;
+import com.galaplat.mfi.model.vo.ApplicationRetryVo;
+import com.galaplat.mfi.model.vo.ApplicationShardVo;
 import com.galaplat.mfi.model.vo.ApplySubmitVo;
 import com.galaplat.mfi.model.vo.CredentialVo;
 import com.galaplat.mfi.model.vo.PpIdPlanVo;
@@ -34,6 +37,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
@@ -59,6 +63,7 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -294,6 +299,112 @@ class ApplicationServiceImplTest {
         assertTrue(saved.getApplicationNo().startsWith("A"), saved.getApplicationNo());
     }
 
+    @Test
+    void replayResetsDeadShardsAndRequeuesTheirCurrentStage() {
+        when(applicationMapper.selectOne(any())).thenReturn(application("FAILED"));
+        when(shardMapper.selectDeadByApplication(TENANT_ID, APPLICATION_ID))
+                .thenReturn(List.of(deadShard(901L, "APPLY", "苹果 500 服务异常"),
+                        deadShard(902L, "FILE_NAME", "下载超时")));
+        when(shardMapper.resetForRetry(anyLong(), anyLong())).thenReturn(1);
+
+        ApplicationRetryVo vo = service.retry("A261010-ABCDEFGH");
+
+        assertEquals(2, vo.getReplayedCount());
+        assertEquals(List.of(901L, 902L), vo.getShards().stream().map(ApplicationShardVo::getShardId).toList());
+        // 返回复位后的状态：DEAD 已回到 PENDING，重试计数与旧死因一起归零/清空
+        assertEquals(List.of("PENDING", "PENDING"),
+                vo.getShards().stream().map(ApplicationShardVo::getStageStatus).toList());
+        assertEquals(List.of(0, 0), vo.getShards().stream().map(ApplicationShardVo::getRetryCount).toList());
+        assertTrue(vo.getShards().stream().allMatch(s -> s.getLastError() == null));
+
+        verify(shardMapper).resetForRetry(TENANT_ID, 901L);
+        verify(shardMapper).resetForRetry(TENANT_ID, 902L);
+        verify(applicationMapper).reopen(TENANT_ID, APPLICATION_ID);
+
+        // 投回各自停住的阶段队列，而不是从 APPLY 重跑一遍
+        ArgumentCaptor<String> queues = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<Object> payloads = ArgumentCaptor.forClass(Object.class);
+        verify(rabbitTemplate, times(2)).convertAndSend(eq(RabbitTopology.EXCHANGE_NORMAL),
+                queues.capture(), payloads.capture(), any(MessagePostProcessor.class));
+        assertEquals(List.of(RabbitTopology.QUEUE_APPLY, RabbitTopology.QUEUE_NAME), queues.getAllValues());
+        assertEquals(List.of("APPLY", "FILE_NAME"),
+                payloads.getAllValues().stream().map(m -> ((StageMessage) m).stage()).toList());
+        assertEquals(List.of(901L, 902L),
+                payloads.getAllValues().stream().map(m -> ((StageMessage) m).shardId()).toList());
+        assertTrue(payloads.getAllValues().stream()
+                .allMatch(m -> ((StageMessage) m).traceId().endsWith("#retry")));
+
+        // 死因在复位前抄进留痕，复位之后库里就没了——排障要能看到"为什么重放"
+        ArgumentCaptor<OperationLogPO> logs = ArgumentCaptor.forClass(OperationLogPO.class);
+        verify(operationLogMapper, times(2)).insert(logs.capture());
+        OperationLogPO entry = logs.getAllValues().get(0);
+        assertEquals("RETRY", entry.getAction());
+        assertEquals("张三", entry.getOperatorName());
+        assertEquals(901L, entry.getShardId());
+        assertTrue(entry.getDetail().contains("苹果 500 服务异常"), entry.getDetail());
+    }
+
+    @Test
+    void replayPublishesOnlyAfterTheResetHasLanded() {
+        when(applicationMapper.selectOne(any())).thenReturn(application("PARTIAL_FAILED"));
+        when(shardMapper.selectDeadByApplication(TENANT_ID, APPLICATION_ID))
+                .thenReturn(List.of(deadShard(901L, "REGISTER", "注册被拒")));
+        when(shardMapper.resetForRetry(anyLong(), anyLong())).thenReturn(1);
+
+        service.retry("A261010-ABCDEFGH");
+
+        InOrder order = inOrder(shardMapper, applicationMapper, rabbitTemplate);
+        order.verify(shardMapper).resetForRetry(TENANT_ID, 901L);
+        order.verify(applicationMapper).reopen(TENANT_ID, APPLICATION_ID);
+        order.verify(rabbitTemplate).convertAndSend(eq(RabbitTopology.EXCHANGE_NORMAL),
+                eq(RabbitTopology.QUEUE_REGISTER), any(Object.class), any(MessagePostProcessor.class));
+    }
+
+    @Test
+    void replaySkipsShardsSomebodyElseAlreadyMoved() {
+        when(applicationMapper.selectOne(any())).thenReturn(application("FAILED"));
+        when(shardMapper.selectDeadByApplication(TENANT_ID, APPLICATION_ID))
+                .thenReturn(List.of(deadShard(901L, "APPLY", "旧失败"), deadShard(902L, "FINISH", "旧失败")));
+        // 901 在两次操作之间已被别人复位，条件更新返回 0
+        when(shardMapper.resetForRetry(TENANT_ID, 901L)).thenReturn(0);
+        when(shardMapper.resetForRetry(TENANT_ID, 902L)).thenReturn(1);
+
+        ApplicationRetryVo vo = service.retry("A261010-ABCDEFGH");
+
+        assertEquals(1, vo.getReplayedCount());
+        assertEquals(902L, vo.getShards().get(0).getShardId());
+        ArgumentCaptor<Object> payloads = ArgumentCaptor.forClass(Object.class);
+        verify(rabbitTemplate, times(1)).convertAndSend(eq(RabbitTopology.EXCHANGE_NORMAL),
+                eq(RabbitTopology.QUEUE_FINISH), payloads.capture(), any(MessagePostProcessor.class));
+        assertEquals(902L, ((StageMessage) payloads.getValue()).shardId());
+        verify(operationLogMapper, times(1)).insert(any(OperationLogPO.class));
+    }
+
+    @Test
+    void replayWithoutDeadShardsIsANoOpInsteadOfAnError() {
+        when(applicationMapper.selectOne(any())).thenReturn(application("SUCCESS"));
+        when(shardMapper.selectDeadByApplication(TENANT_ID, APPLICATION_ID)).thenReturn(List.of());
+
+        ApplicationRetryVo vo = service.retry("A261010-ABCDEFGH");
+
+        assertEquals(0, vo.getReplayedCount());
+        assertTrue(vo.getShards().isEmpty());
+        // 连事务都不该开：第二次点击、或分片已被兜底扫描捞回，都不该产生任何写入与消息
+        verify(transactionTemplate, never()).execute(any());
+        verify(shardMapper, never()).resetForRetry(anyLong(), anyLong());
+        verify(rabbitTemplate, never()).convertAndSend(any(String.class), any(String.class), any(Object.class),
+                any(MessagePostProcessor.class));
+    }
+
+    @Test
+    void replayRefusesApplicationsThatAreNotInTheTenant() {
+        when(applicationMapper.selectOne(any())).thenReturn(null);
+
+        BizException e = assertThrows(BizException.class, () -> service.retry("A261010-NOPE"));
+        assertTrue(e.getMessage().contains("不属于当前租户"), e.getMessage());
+        verify(shardMapper, never()).selectDeadByApplication(anyLong(), anyLong());
+    }
+
 
     private static UserPO user(String name) {
         UserPO row = new UserPO();
@@ -323,6 +434,30 @@ class ApplicationServiceImplTest {
         row.setAllocateCount(allocateCount);
         row.setStage("APPLY");
         row.setStageStatus("PENDING");
+        return row;
+    }
+
+    /** 终态失败的分片：重放只认这一种，且必须带得上一次停住的阶段与死因 */
+    private static ApplicationPpidPO deadShard(long id, String stage, String lastError) {
+        ApplicationPpidPO row = new ApplicationPpidPO();
+        row.setId(id);
+        row.setPpid("PPID-" + id);
+        row.setAllocateCount(30);
+        row.setStage(stage);
+        row.setStageStatus("DEAD");
+        row.setRetryCount(3);
+        row.setLastError(lastError);
+        return row;
+    }
+
+    private static ApplicationPO application(String status) {
+        ApplicationPO row = new ApplicationPO();
+        row.setTenantId(TENANT_ID);
+        row.setId(APPLICATION_ID);
+        row.setApplicationNo("A261010-ABCDEFGH");
+        row.setStatus(status);
+        row.setApplyQuantity(60);
+        row.setPpidCount(2);
         return row;
     }
 

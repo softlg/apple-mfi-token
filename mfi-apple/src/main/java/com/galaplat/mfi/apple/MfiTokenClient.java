@@ -29,7 +29,7 @@ import java.util.Map;
  * 苹果 MFI Software Token API 客户端。一个实例只属于一个租户：证书与 BaseURL 都在构造时定死。
  *
  * <p>本类不感知数据库、租户上下文与 Spring，凭证由调用方以 PEM 文本传入并装配成 {@code httpClient}。
- * 日志只打 ppid、数量与错误码；token 原文、auth_entity_id 清单一律不落日志。
+ * 日志只打数量、文件名与错误码；PPID、token 原文、auth_entity_id 清单一律不落日志（§6.3 红线）。
  */
 @Slf4j
 public class MfiTokenClient {
@@ -48,9 +48,12 @@ public class MfiTokenClient {
 
     /**
      * 3.1.1 批量申请认证实体。返回的 request_id 是后续取文件名与查状态的唯一凭据。
+     *
+     * <p>这三个方法都只打数量不打 PPID：§6.3 的日志红线包含 PPID 明文，而调用方日志已经带了 shardId 与
+     * 申请单号，PPID 回库一查就有。
      */
     public MfiResponse requestAuthEntities(String ppid, int count) throws IOException {
-        log.info("申请认证实体: ppid={}, count={}", ppid, count);
+        log.info("申请认证实体: count={}", count);
         return post(MfiEndpoints.PATH_AUTH_ENTITY_REQUESTS, new AuthEntityRequest(ppid, count), MfiResponse.class);
     }
 
@@ -90,7 +93,7 @@ public class MfiTokenClient {
             throw new IllegalArgumentException("单批注册上限 " + BulkUsedAuthEntityRequest.MAX_BATCH_SIZE
                     + "，当前 " + authEntities.size());
         }
-        log.info("批量注册已使用: ppid={}, count={}", ppid, authEntities.size());
+        log.info("批量注册已使用: count={}", authEntities.size());
         return post(MfiEndpoints.PATH_BULK_USED, new BulkUsedAuthEntityRequest(ppid, authEntities), MfiResponse.class);
     }
 
@@ -119,7 +122,7 @@ public class MfiTokenClient {
      * 3.5 销毁未使用的认证实体。不可逆。
      */
     public MfiResponse destroyUnusedAuthEntities(String ppid, List<String> authEntityIds) throws IOException {
-        log.info("销毁未使用: ppid={}, count={}", ppid, authEntityIds.size());
+        log.info("销毁未使用: count={}", authEntityIds.size());
         return post(MfiEndpoints.PATH_UNUSED, new DestroyUnusedRequest(ppid, authEntityIds), MfiResponse.class);
     }
 
