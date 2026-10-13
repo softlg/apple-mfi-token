@@ -10,13 +10,26 @@
 
 ## 当前状态
 
-**开发计划待确认，尚未进入编码。**
+**P0–P8a 已交付并在本机活体验收**（真实 MySQL + Redis + RabbitMQ + 自签 CA 的 two-way TLS 桩）。
+唯一未完成的是 **P8b 真证书联调**，阻塞在外部输入：需要厂商真实的苹果客户端证书。
 
 - 产品约束、表结构、五阶段流水线设计、分期计划与验收标准见
   [docs/DEVELOPMENT_PLAN.md](docs/DEVELOPMENT_PLAN.md)
+- 苹果 API 语义、状态机、隔离边界与日志红线见 [docs/mfi-token-flow.md](docs/mfi-token-flow.md)
+- 依赖版本、环境变量、构建/运行/运维参数见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
 - 工程执行守则见 [AGENTS.md](AGENTS.md)
-- 计划 §13 列有 8 个待确认的开放问题（PPID 来源、`apple_technology` 取值域、SN 规则、
-  销毁权限、通知渠道、部署形态、DAO 风格、苹果测试环境）
+- 计划 §13 的开放问题已在实现中逐条收敛，结论与偏离记在 §11 各阶段的"编码期偏离与取舍"
+
+## 快速开始
+
+```bash
+mvn -q -DskipTests install            # 后端（JDK 17）
+cd web && pnpm install && pnpm build   # 前端（用 pnpm，不用 npm）
+cd .. && java -jar mfi-service/target/apple-mfi-token.jar
+curl -s localhost:8090/api/health
+```
+
+必需环境变量与可覆盖项见 `.env.example`，本地覆盖写进 gitignored 的 `application-local.yml`。
 
 ## 技术栈
 

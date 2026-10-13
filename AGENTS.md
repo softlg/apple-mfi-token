@@ -8,6 +8,11 @@ Prefer hard execution rules over general description.
 Read `docs/DEVELOPMENT_PLAN.md` before starting any phase. It defines the tenant model, the
 database schema, the five-stage token pipeline, and the phased delivery plan.
 
+Before touching the pipeline, PPID allocation, destroy, or export, read `docs/mfi-token-flow.md` — it is the
+implementation-side statement of Apple API semantics (accept != ready, 4xx vs 5xx handling, registration is
+irreversible), the four state machines, and the tenant-isolation boundary. `docs/DEPLOYMENT.md` covers
+environment variables, build, and the operational knobs (`mfi.pipeline.delay-tiers` changing queue names).
+
 ## Core Facts
 
 This repository is a Maven multi-module SaaS backend plus a Vue frontend:

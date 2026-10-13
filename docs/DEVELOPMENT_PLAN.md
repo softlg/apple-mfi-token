@@ -109,7 +109,8 @@ apple-mfi-token/
 ├─ .env.example                 必需环境变量清单（不含真实值）
 ├─ docs/
 │  ├─ DEVELOPMENT_PLAN.md       本文件
-│  └─ mfi-token-flow.md         苹果 API 语义与状态机说明
+│  ├─ mfi-token-flow.md         苹果 API 语义与状态机说明
+│  └─ DEPLOYMENT.md             部署与运行说明
 ├─ mfi-apple/                   苹果 MFI 客户端（多租户 mTLS）
 │  └─ src/main/java/com/galaplat/mfi/apple/
 │     ├─ MfiTokenClient.java        9 个苹果接口的封装
@@ -574,7 +575,8 @@ MFI_SERVER_PORT                    # 默认 8090
 | **P6** 结果与导出 **（已完成，本机验收 93/93）** | SN：`SnUtil`（企业段 + PPID 后 6 位清洗 + 年字母 + MMDD，移植 MES 规则）+ `SnAllocator`（Redis `INCRBY` 一次占一段连续流水，**计数器 key 的粒度严格等于 SN 前缀粒度**，生产日按 `Asia/Shanghai` 取，4 位补零流水超上限只变长不截断）+ `FinishStageHandler` 只给缺号行发号并做收口两道校验；读侧：`ApplicationQueryService`（详情一次给全五阶段进度/分片明细/token 汇总/时间线）、`TokenQueryService`（分页 + 按 SN 反查，响应不含四个凭证列）、`GET /api/applications/{no}`、`/{no}/files`、`GET /api/tokens/page`；人工重放：`POST /api/applications/{no}/retry` + `ApplicationMapper.reopen`（只复位 FAILED/PARTIAL_FAILED 并抹掉上一轮死因）；异步导出：`ExportTaskPO`/`ExportTaskMapper`/`ExportProperties`/`ExportExecutorConfig`（有界线程池 + 队列满即拒）、`ExportServiceImpl`（keyset 分页、`max-rows` 触顶截断记 WARN、僵死 PROCESSING 扫描、产物目录约束、只认发起人）、`TokenExportRow`（十列列序即契约）、CSV 带 UTF-8 BOM / XLSX、RFC 5987 文件名、`GET /api/export-tasks/{taskNo}` 与 `/download`；销毁：`TokenDestroyRequest`/`TokenDestroyVo`/`TokenDestroyService` + `POST /api/tokens/destroy`（仅 owner、单号原样二次确认、只对 ISSUED 候选、按 PPID 归堆后每 100 个一批、被拒即停手、`hasMore` 如实回报）；**收尾修正**：`TokenMapper` 三处补 `status <> 'DESTROYED'`、`TokenStatus.destroyable()` 收窄到 ISSUED、`MfiTokenClient` 日志摘掉 PPID 与实体清单、`ResponseWrapAdvice` 不再包装 `ResponseEntity`；**fixture**：`scripts/MfiStubServer.java` 补 `unusedAuthEntities` 路由与 `REGISTERFAIL`/`DESTROYFAIL` 两条剧情 + `auth_entities`/`auth_entity_ids` 计数日志（一律不带 PPID），`scripts/verify-p6.py`（93 项活体断言） | **已验证**：`mvn -o -am -pl mfi-service test` 全绿（apple 17 + dao 12，其中 3 项真实库并发 IT 无 `MFI_IT_DB` 时跳过 + service 153），P6 新增/改写 58 项：`SnUtilTest` 9（逐条对着 MES 的 `generateSnPrefix` 断言，厂商产线已按这 16 位排产）、`SnAllocatorTest` 6（指定生产日期入参，跨年/跨月边界不依赖跑测试的当天）、`FinishStageHandlerTest` 9（可重入：只补空号行、绝不换掉已发出的 SN）、`ApplicationQueryServiceTest` 7、`TokenQueryServiceTest` 6、`ExportServiceImplTest` 9（翻页/截断/产物路径约束/只认发起人）、`TokenDestroyServiceTest` 10（**非 owner 在读任何数据之前就被拒**、二次确认必须逐字相同、按 PPID 归堆后切成 `[100,20,1]` 三批、一批被拒即停手并如实回已销毁数、留痕只记数量、`auth_entity_id` 为空判为数据损坏而非静默跳过）、`ResponseWrapAdviceTest` 2；**对真实 MySQL + Redis + RabbitMQ + 自签 CA 的 two-way TLS 桩跑 93 项活体断言，0 失败**：六个 token 走完五阶段且 SN 前段实测等于「E + PPID 后 6 位 + 年字母 B + MMDD」、4 位流水连续、互不重复，**三张单共用同一条计数器**（PPID 后 6 位同为时间戳 → 前段相同）并按 `1-6`、`7-1206` 连续推进不重号；详情一次给全五阶段（`reached=succeeded=1`、`dead=0`）、时间线五条 `STAGE_ADVANCE`、token 汇总按状态分组、两份文件行数之和=申请量且都 SUCCESS；token 分页六行含 PPID/SN/状态而**响应体内 `encodedToken`/`secretKey`/`authEntityId`/`accessoryUuid` 四个键一个都没有**、按 SN 反查命中 1 行；CSV 下载带 UTF-8 BOM、表头与十列列序逐字对齐、行数=1+6、产物里能看到 base64 的 token 原文与刚发出的 SN、库里只存 `E261012-xxxx.csv` 这一相对文件名；导出越权六项（隔壁租户读不到任务号也拿不到字节、同租户成员读不到 owner 的任务、成员可以自己发起、反过来 owner 也读不到成员的）；**1200 行的真实大单在 `page-size=100 / max-rows=1000` 下翻满 10 页并触顶截断**（`totalRows=1000` + WARN 日志 + XLSX 是合法 zip 容器 + 留痕 `EXPORT\|1000`）；`REGISTERFAIL` 剧情让分片 DEAD 在 REGISTER（退避一次后终态、桩侧正好被打了两次注册、六个 token 停在 ISSUED 且无 SN、聚合 FAILED 且写了 `fail_reason`、进度页 REGISTER `dead=1` 而 FINISH `reached=0`）；销毁的四道拒绝（非 owner HTTP 403、二次确认不一致、隔壁租户、确认位为空）之后**桩侧销毁调用增量为 0 且库里状态未变**；正常销毁 `selected=destroyed=6`、一个批次、六行 DESTROYED、留痕 `DESTROY\|6` 且 detail 里既无 PPID 也无 `AUTH`；对已注册的单候选为 0（不报错也不打苹果）、重复点击不再有调用；**销毁之后人工重放**这一节一次证完三处 mapper 修正：`replayedCount=1` 且分片回到 REGISTER/PENDING（`retry_count` 归零、`last_error` 清空）、单子被拉回进行中且上一轮 `fail_reason` 抹掉、走到 FINISH/SUCCESS、**桩侧注册调用没有新增**（已作废实体不再送苹果）、六行仍是 DESTROYED 且收口不把它们算成漏注册、**已销毁的实体一个序列号也没白占**（SN 仍为 0）、整单 SUCCESS + `finish_time` 重新落上 + `token_count=6`、无 DEAD 时重放是空操作而不是报错；日志红线八项（三份 PPID 明文、SN 前段、token 原文的 base64 前缀、`==> Parameters`、`PRIVATE KEY` 在运行日志里全部 grep 为 0，产物目录只含 `<任务号>.<后缀>`）；五个阶段队列与 DLQ 收口 0 积压；本轮把"导出 1 万条不 OOM"这条验收改成**低档位让翻页与截断都真的发生**（机制由 keyset 分页 + 单页驻留 + 单测支撑，见下方第 7 条），并修掉一处只在活体才暴露的下载 500（第 12 条） | 1d |
 | **P7** 前端 **（已完成，浏览器实测全绿）** | `web/` 共 27 个源文件：Vite 6 + Vue 3.5 + TS 5.7 + Pinia + Element Plus 2.9（全量引入 + zh-cn locale）、hash 路由 + 全局守卫、`api/http.ts`（统一响应解析、会话令牌走请求头、`download`+`saveBlob` 二进制出口）、`api/token.ts`（localStorage 存取）、`stores/session.ts`（profile/租户列表/owner 位一律每次回服务端读，不缓存权限）、`dict.ts`（六套状态字典 + 未知值 fallback 原样显示）、`utils/format.ts`（`fmtDateTime` 按固定位截取而不是 `new Date()` 解析）、外壳 `AppLayout.vue`（租户切换器 + owner 标记 + "当前账号不属于任何租户"提示）、十个页面：登录/注册 + PPID 池、发起申请、申请列表、申请详情（五阶段进度时间线 + 分片明细 + 人工重放）、Token 结果（筛选/导出/销毁）、成员管理、租户设置、MFI 凭证；单进程部署：`mfi-service/pom.xml` 新增**按文件自动激活**的 `web-ui` profile，`web/dist/index.html` 存在时由 `maven-resources-plugin` 在 `process-resources` 把产物拷进 `classes/static`；**活体实测倒逼出的五处后端/前端修正**：`sa-token.is-read-cookie: false`、`session.expired` + 外壳跳转登录页、`NoResourceFoundException`→404（不再按 500 打全栈）+ `index.html` 内联 SVG 图标、`CredentialView` 的 PEM 落 DOM 拆分、12 个 PO 的 `create_time`/`update_time` 写策略 `FieldStrategy.NEVER` | **已验证**：`pnpm typecheck`（vue-tsc）与 `pnpm build` 通过，产物 `index-Bdmu5e66.js` / `index-gP46p-Fd.css`（gzip 368 KB / 49 KB），且实测浏览器加载的就是这两个最终文件名；`mvn -o -q -DskipTests compile` 与 `mvn -o -q -am -pl mfi-service install -DskipTests` 全绿，
 DAO 写策略改动之后 `mvn -o -am -pl mfi-service test` 复跑仍然全绿（service 153 项 + dao + apple，BUILD SUCCESS）；**单进程实测**：`GET /` 200 且带内联图标、带 hash 的静态资源 200、`GET /favicon.ico` 404 且运行日志 ERROR 增量为 0（改前是被兜底 advice 记成"未预期的系统异常" + 全栈）；**对真实 MySQL + Redis + RabbitMQ + 自签 CA 的 two-way TLS 桩把 §9 的完整链路在浏览器里点通**（两个浏览器分别登录两个身份）：注册新租户→上传证书（三道校验的失败路径与成功路径各走一遍，替换后指纹/Subject/到期日/版本 v1→v2 全部刷新、MFI 客户端重建）→租户设置里把 BaseURL 改指桩→连通性自检 `reachable`→Excel 导入（含故意放错的 0 量行：逐行报错且 `insertedRows=0`，改正后入库、池子总览与导出对得上）→发起申请（分配预览与实际分配同一口径、幂等键换新、余量不足时先给横幅不落单）→五阶段推进到**成功**（详情时间线逐阶段 `reached/succeeded`、下载与注册时刻落上、两张 token 各得一个 SN）→Token 列表按状态筛选→异步导出（任务轮询到 SUCCESS 后 Blob 落地、文件名按 RFC 5987 还原）→owner 销毁（**单号输错即中止且苹果侧零调用**，原样二次确认后 6 条落 DESTROYED）→`REGISTERFAIL` 单走到**已终止**并在进度页人工重放→成员邀请与启停→**非 owner 身份**（同一账号在隔壁租户是 owner、在本租户是普通成员）下凭证/租户配置/成员移除/owner 转让/销毁五个入口全部不可见或 403；**会话与越权边界**：刷新后仍在登录态、令牌被服务端判失效时业务码 `A0401` 触发 `#/login?redirect=/ppid` 且重新登录后回到原页、主动退出不带 redirect；关掉 cookie 通道后 `document.cookie` 实测为空字符串（改前删掉 localStorage 旧会话仍能靠 cookie 续命）；**红线复看**：页面 DOM 与可访问性树里 `bodyHasPem=false`、token 列表只有状态与 SN 而无 `encodedToken`/`secretKey`/`authEntityId`/`accessoryUuid`，运行日志 `grep` 到 ERROR 0 条、WARN 0 条、`BEGIN CERTIFICATE`/`PRIVATE KEY`/`==> Parameters` 各 0 条、异常栈 0 条，浏览器控制台除两次**故意触发的** HTTP 400 与 harness 自己的 file-chooser 提示外无 error；**时间戳缺陷的活体复验**：修 DAO 写策略后，编辑 PPID 备注使更新时间由 `12:25:40` 走到 `12:50:54`，新单 `A261012-5SCWBREF` 的创建/更新为 `12:52:12`/`12:52:14`（修前该类读改写路径会把更新时间冻在创建时刻）；未验证项：真实苹果（P8b 阻塞）、以及因内置浏览器无 viewport 而无法做的像素级点击与视觉走查（按钮一律按 DOM 事件触发，布局只做了文本层核对） | 2d |
-| **P8a** 本地安全验收 | `docs/mfi-token-flow.md`、日志脱敏复查、跨租户渗透自测、部署说明、§11 最终验收清单逐项 | 除"真证书联调"外的全部验收项通过 | 1d |
+| **P8a** 本地安全验收 **（已完成，活体 76/76）** | `docs/mfi-token-flow.md`（苹果接口语义 → 同步段三条硬约束 → 五阶段跃迁与四态结论 → 分片/申请单/token/导出任务四张状态机 → 隔离边界 → 日志红线 → 故障模式表 → 未验证项）、`docs/DEPLOYMENT.md`（依赖版本实测口径、必需与可覆盖环境变量、底座、构建、单进程运行、运维参数与告警抓手、备份与迁移纪律、本地验收跑法）、`scripts/verify-p8.py`（只依赖标准库的活体渗透与红线脚本：自己注册三个租户、各传一套证书、双线程并发下单、`taskkill` 真杀 broker 再拉起、跨租户逐端点渗透、整轮日志 grep）、`README.md` 的当前状态与快速开始同步刷新 | **已验证**：`python -m py_compile` 通过；**对真实 MySQL + Redis + RabbitMQ + 自签 CA 的 two-way TLS 桩跑 76 项活体断言，0 失败 0 跳过**。（**[A] 双租户独立证书**：甲用 PKCS#8、乙用 PKCS#1，两套材料指纹不同且都通过入库三道校验；两个租户各自把 BaseURL 指向桩后自检 `reachable`，**桩侧同轮日志里出现 `clientCert=CN=MFI Tenant A Client` 与 `CN=MFI Tenant B Client`**——per-tenant SSLContext 不是共享证书；同一 `PPID+SPU` 字符串在两侧各建一行且库里 `count=2`。（**[B] 并发**：两线程同时各发 3 个，两单都到 SUCCESS，两侧 `t_token` 都是 `[3,3,3,3]`（行数/注册数/不重复 SN/实体 id 齐），两侧池子各自只扣 3、余 9，第三个租户分页 0 行。（**[C] 故障隔离**：过期证书在入库前即拒（不落库）；无凭证租户提交拿 `B0404/B0500` 业务码而不是 500；**与此同时甲租户的下一单照常走完 SUCCESS**。（**[D] 断 MQ 自愈（补掉 P5 欠的那条）**：`taskkill` 掉 5672 监听进程后提交仍返回单号、分片停在 `APPLY\|PENDING`、日志记"分片消息投递失败，等待兜底扫描补发"；重新拉起 broker 后分片被补发并走到 SUCCESS，**该单仍只有 1 个分片、甲名下累计 7 行 7 个不重复 SN（补发不重号也不漏行）**，`rabbitmqctl list_queues` 实测 21 条队列（5 阶段 + DLQ + 15 延迟档位；本轮为把小时级等待压进一分钟内用 `-D` 临时
+收到 3 档，入库默认 4 档即 20 条延迟队列）全部由 `Declarables` 重声明回来、收口零积压，扫描日志出现"补发 PENDING"，重连过程无未预期异常。（**[E] 跨租户渗透 24 断**：详情/文件/列表/重放/PPID 三写入口/池查询/池总览/池导出/token 分页/SN 反查/销毁/发起导出/任务状态/任务下载/成员列表/邀请/成员启停/移除/转让 owner/凭证/租户配置——读侧一律"不可寻址"、写侧一律"影响 0 行且库里一行未动"，其中**乙按甲的单号发起导出被直接拒掉**，甲自己的产物可下载且含 token 原文、乙读不到也下不到。（**[F] 红线 15 断**：整轮日志 grep 不到 PPID 明文、token 原文的 base64 前缀、`PRIVATE KEY`、`BEGIN CERTIFICATE`、`==> Parameters`，并且**从库里抽出真实列值回查日志**——`auth_entity_id`、`accessory_uuid`、`secret_key`（苹果 CRC32）、`encoded_token`、`manufacture_sn` 五个列各抽样若干值，一个都没出现在日志里；本轮无"未预期的系统异常"；mapper 包 DEBUG 只存在于注释行；导出目录只含 `<任务号>.<后缀>`；`information_schema` 里没有任何 role/permission/menu/scope 表；前端源码无 `v-permission`/`hasPermission`/`roles=`/`permissionCodes`。另复跑 `mvn -o -q -DskipTests compile` 与既有单测口径确认无回归。**未验证项**：§13.2 的 5 项真证书风险（P8b 阻塞）；跨租户会话切换与 owner 位实时性沿用 P1 的 33 项活体结论，本轮脚本未重复 | 1d |
 | **P8b** 真证书联调（**阻塞**） | 拿厂商真实证书后验 §13.2 列出的 5 项未验证风险：真实证书链与 CN 校验、`technology` 取值接受度、真实限流阈值、响应字段与文档一致性、苹果侧 PPID 配额 | 不在本次可交付范围，需外部输入才能启动 | 待定 |
 
 合计约 **10.5 人日**（不含 P8b）。P0–P6 与苹果真实网络无关，本机 MySQL + Redis + RabbitMQ 三件套已就绪，可全程连续真实验证；P7 前端可浏览器实测完整链路；只剩 P8b 阻塞在外部输入（真实厂商证书）。
@@ -809,15 +811,72 @@ DAO 写策略改动之后 `mvn -o -am -pl mfi-service test` 复跑仍然全绿�
     因此按 `.el-message-box` 这类宽选择器操作有命中陈旧弹窗的风险——本轮就因此误重放过一次已终态的分片（无害且最终仍是 DEAD，
     但要记下来：后续验收脚本必须用"当前可见且文案匹配"的双重条件定位）。
 
+### P8a 编码期偏离与取舍（验收脚本第一轮就崩，记录以免复发）
+
+1. **桩的 stdout 丢了，per-tenant 证书证据一度取不到**：环境崩溃后用 `Start-Process` 重拉 mTLS 桩时没带
+   `-RedirectStandardOutput`，桩日志全进了隐藏窗口，`stub-p7.log` 是 0 字节，于是"[A] 桩侧按租户各自出示客户端
+   证书"只能拿到空串。重拉一律 `Start-Process ... -RedirectStandardOutput .dev-certs/stub-p8.log`。
+   fixture 问题，不是产品问题——但它的表现和"产品没按租户分证书"一模一样，容易误判。
+2. **脚本自己的返回类型不统一**：`call()` 回 2 元组、`raw_get()` 回 3 元组，两处按 3 元组解包 `call` 直接
+   `ValueError`，另一处把 `point_at_stub` 的元组当 payload 传给 `ok()` 触发 `AttributeError`，第一跑就崩在 [A]。
+   辅助函数返回 payload 还是 (status, payload) 必须在定义处收口。
+3. **故障注入那一节没给自己留额度**：池子只开到 6，[B] 扣 3、[C] 再扣 2 之后剩 1，[D] 又要提交 2，被产品自己的
+   额度闸门拒掉（`A0422 额度不足`），[D] 整节级联失败。**产品行为是对的**（先拒后扣、不落单、不动额度），
+   错在脚本的账。池子改 12，同步改三处期望值。
+4. **跨租户 SN 重号不是越权**：原以为"乙按甲的 SN 反查必然 0 行"，实测拿到 1 行；回库核对是乙自己那行——
+   SN 计数器 key 含 `tenant_id`，两个租户用同一 PPID 字符串时各自从 0001 开始。判定口径改成"返回的行全是乙的、
+   绝不含甲的行号"。这与 P6 记下的"计数器粒度等于 SN 前缀粒度"一致：**SN 只在租户内唯一**是设计决定。
+5. **"读不到隔壁凭证"这个断言在结构上不成立**：`/api/tenant/credential` 没有租户入参，永远解析到调用方自己的
+   租户，乙 GET 拿到的是**乙自己的**元数据且 HTTP 200。隔离的证据形态因此是"指纹与甲不同"，不是"报错"。
+6. **跨租户"不存在"的业务码是 `A0422` 而不是 `B0404`**：`B0404` 在本仓库专指"租户尚未配置 MFI 客户端证书"。
+   断言按实际语义放宽为 `A0422` + 文案含"不存在"，"不区分无权与不存在"这条要求不变。
+7. **拓扑核对要用真实队列名，不能用前缀**：第一轮拿 `mfi.apply`/`mfi.finish`/`mfi.dlq` 三个前缀匹配，把 DLQ 的
+   真实名字 `mfi.token.dlq` 判成缺失。改为五条阶段队列 + DLQ 逐名核对，外加"延迟队列正好 15 条"（总数 21）。
+8. **"本轮日志增量"需要两条基线**：一个偏移量变量在 [D] 中途被重设过，导致 [F] 的"本轮没有未预期异常"实际只覆盖
+   broker 重启之后那一小段。拆成 `log_run_start`（整轮）与 `log_before`（分段）。
+9. **红线只 grep 关键字不够**：补成"从库里抽真实列值回查日志"——`auth_entity_id`、`accessory_uuid`、`secret_key`
+   （苹果 CRC32）、`encoded_token`、`manufacture_sn` 各抽 60 个值去 grep。字段名不出现在日志里，不代表值没漏进
+   异常栈或参数打印。
+10. **[D] 故意造的 ERROR 与"日志干净"不冲突**：断 MQ 必然带来"投递失败"与重连噪声，所以红线口径收在
+    "未预期的系统异常"这条可判定的断言上，而不是笼统的 ERROR 计数为 0。
+11. **`rabbitmqctl` 单次 10–30 秒**：整轮只在 [D] 与 [G] 各取一次队列快照，其余自愈判定走 MySQL 与 HTTP。
+12. **杀 broker 认 5672 的监听 PID**：`netstat -ano` 解析比按映像名 `taskkill` 准，也不会误伤同机其他 Erlang 进程。
+    重拉用脚本内 `Start-Process`，验收结束后 broker 以新 PID 继续在跑。
+13. **文档落点**：`mfi-token-flow.md` 把三条对代码有直接影响的苹果行为写在最前（受理≠到货、4xx 与 5xx 处置不同、
+    注册不可逆）；`DEPLOYMENT.md` 明确两条运维红线——访问真实苹果必须**留空** `MFI_APPLE_TRUSTED_CA_PEM`，
+    以及改 `mfi.pipeline.delay-tiers` 等于改队列名，必须先停生产、排空旧队列再上新配置。
+
 ### 最终验收清单
 
-- [ ] 两个租户各用独立证书并发申请，数据、PPID、token 完全隔离
-- [ ] 任一租户证书错误/过期不影响其他租户消费
-- [ ] 全程无明文凭证与 `secret_key` 出现在日志
-- [ ] 运行日志 `grep` 不到 PPID 明文，也 `grep` 不到 SQL 的 `==> Parameters`（入库配置里 mapper 包必须是 INFO，见 §6.3）
-- [ ] 无角色表、无权限点、前端无权限树（确认"不做权限管理"落地）
-- [ ] `mvn -q -DskipTests compile` 与 `mvn test` 全绿
-- [ ] 断掉 MQ 重启后，兜底扫描能自愈未完成分片
+2026-10-13 由 `scripts/verify-p8.py` 对真实 MySQL + Redis + RabbitMQ + 自签 CA 的 two-way TLS 桩逐条收口
+（76 项活体断言 0 失败 0 跳过；节号 [A]–[G] 对应脚本输出）。
+
+- [x] 两个租户各用独立证书并发申请，数据、PPID、token 完全隔离 —— **[A]/[B]**：甲 PKCS#8、乙 PKCS#1，
+    两套材料指纹不同且都通过三道入库校验；桩侧同轮日志分别读到 `CN=MFI Tenant A Client` 与
+    `CN=MFI Tenant B Client`（证明不存在共享证书）；两线程同时各发 3 个都走到 SUCCESS，两侧 `t_token` 都是
+    `[行数, 注册成功数, 不重复 SN 数, 实体 id 非空数] = [3,3,3,3]`，同一 `PPID+SPU` 在两侧各建一行且各自只扣 3；
+    第三个租户分页 0 行
+- [x] 任一租户证书错误/过期不影响其他租户消费 —— **[C]**：过期证书在入库前即被拒（库里没落任何密文行）、
+    无凭证租户提交拿 `B0404/B0500` 业务码而不是 500，**与此同时甲租户的下一单照常走完 SUCCESS**
+- [x] 全程无明文凭证与 `secret_key` 出现在日志 —— **[F]**：`PRIVATE KEY`/`BEGIN CERTIFICATE` grep 为 0，
+    并从库里抽真实列值回查（`auth_entity_id`、`accessory_uuid`、`secret_key`（苹果 CRC32）、`encoded_token`、
+    `manufacture_sn` 各抽样若干）全部一个不见
+- [x] 运行日志 `grep` 不到 PPID 明文，也 `grep` 不到 SQL 的 `==> Parameters`（入库配置里 mapper 包必须是 INFO，
+    见 §6.3）—— **[F]**：本轮 PPID 明文与 `==> Parameters` 各 0 条；`application.yml` 里 mapper 包的 DEBUG
+    只存在于注释行，非注释状态一律是 INFO
+- [x] 无角色表、无权限点、前端无权限树（确认"不做权限管理"落地）—— **[F]**：`information_schema` 里没有任何
+    role/permission/menu/scope 表；前端源码没有 `v-permission`/`hasPermission`/`roles=`/`permissionCodes`
+- [x] `mvn -q -DskipTests compile` 与 `mvn test` 全绿 —— 2026-10-13 实测：compile 退出码 0；
+    `mvn -o -q -am -pl mfi-service test` 共 182 项（apple 17 + dao 12 + service 153），
+    failures 0、errors 0、skipped 3（dao 的三项真实库并发 IT 需要 `MFI_IT_DB=1` 才启用）
+- [x] 断掉 MQ 重启后，兜底扫描能自愈未完成分片 —— **[D]**（P5 欠下的那条，本轮真杀）：`taskkill` 掉 5672 的
+    监听进程后提交仍返回单号、分片停在 `APPLY|PENDING`、日志记"分片消息投递失败，等待兜底扫描补发"；重新拉起
+    broker 后分片被补发并走到 SUCCESS，**该单仍只有 1 个分片、甲名下累计 7 行 7 个不重复 SN（不重号也不漏行）**；
+    `rabbitmqctl list_queues` 实测 21 条队列（5 阶段 + DLQ + 15 延迟档位）全部由 `Declarables` 重声明回来、
+    收口零积压，扫描日志出现"补发 PENDING"，重连过程无未预期异常
+
+跨租户渗透（[E]，24 断）与 §8 端点逐条对照见 §11 的 P8a 行；"任何页面不得渲染私钥文本"由 P7 的浏览器实测与
+`AGENTS.md` 的高风险清单条目共同守住，本轮 [F] 追加了服务端日志侧的取证。
 
 ---
 
@@ -898,14 +957,22 @@ P5 的应对（已由用户选定）：
 
 ## 14. 下一步
 
-P0–P7 已交付并本机验收（§11）。P5 把五个阶段的队列、TTL→DLX 延迟回流、CAS 跃迁、重试与 DLQ、兜底扫描接成闭环；
+P0–P8a 已交付并本机验收（§11）。P5 把五个阶段的队列、TTL→DLX 延迟回流、CAS 跃迁、重试与 DLQ、兜底扫描接成闭环；
 P6 把结果侧收口：SN 按"计数器粒度等于 SN 前缀粒度"的 Redis 号段生成、进度与结果的三个读接口、失败分片的人工重放、
 有界线程池的异步导出（产物含 token 原文，因此只认发起人），以及销毁未使用实体——本服务唯一一个"不可逆且把额度还给
 PPID"的入口；P7 补上前端与控制台，并第一次把 §8 的全部端点按真实顺序串起来——它确实找出了五个只有真点才暴露的问题
 （时间戳写回、cookie 会话通道、A0401 不跳转、favicon 打成 500、私钥进可访问性树），逐条记在 §11 的 P7 偏差里。
 
-接下来是 **P8a 本地安全验收**：按 §11 最终验收清单逐项复跑，写 `docs/mfi-token-flow.md` 与部署说明，做一次日志脱敏
+**P8a 本地安全验收**按 §11 最终验收清单逐项复跑，写 `docs/mfi-token-flow.md` 与部署说明，做一次日志脱敏
 复查与跨租户渗透自测（含 P7 新记的"任何页面不得渲染私钥文本"），并补掉 P5 欠下的那条：把本机共享的 RabbitMQ 重启一次，
-证明拓扑重声明与兜底扫描自愈真的成立。P8b 真证书联调仍阻塞在外部输入（厂商真实客户端证书），§13.2 列出的 5 项风险在
-拿到证书之前无法验证。
+证明拓扑重声明与兜底扫描自愈真的成立。
+
+**P8a 已完成**（2026-10-13）：`scripts/verify-p8.py` 对真实 MySQL + Redis + RabbitMQ + 自签 CA 的 two-way TLS 桩跑满
+76 项活体断言、0 失败 0 跳过，§11 的最终验收清单七项逐条收口；`docs/mfi-token-flow.md` 与 `docs/DEPLOYMENT.md` 落地；
+断 MQ 那一条是真杀的（`taskkill` 掉 5672 的监听进程再拉起），补发、拓扑重声明、零积压都在库里和 `rabbitmqctl` 上对过账。
+脚本第一轮暴露的 13 条（自己的返回类型不统一、故障注入没留额度、跨租户 SN 重号的判定口径、桩的 stdout 丢了等）
+记在 §11 的"P8a 编码期偏离与取舍"。
+
+剩下的 **P8b 真证书联调仍阻塞在外部输入**（厂商真实客户端证书），§13.2 列出的 5 项风险——真实证书链与 CN 校验、
+`technology` 取值接受度、真实限流阈值、响应字段与文档一致性、苹果侧 PPID 配额——在拿到证书之前无法验证。
 编码过程中的偏离会在本文档同步更新。
