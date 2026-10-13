@@ -3,7 +3,7 @@ package com.galaplat.mfi.issuance.application.pipeline.handler;
 import com.galaplat.mfi.apple.MfiTokenClient;
 import com.galaplat.mfi.apple.model.TokenFileRow;
 import com.galaplat.mfi.apple.model.TokenFileDownload;
-import com.galaplat.mfi.credential.infrastructure.client.MfiClientFactory;
+import com.galaplat.mfi.credential.domain.AppleClientProvider;
 import com.galaplat.mfi.issuance.domain.Stage;
 import com.galaplat.mfi.shared.api.BizException;
 import com.galaplat.mfi.issuance.infrastructure.persistence.TokenFilePO;
@@ -38,11 +38,11 @@ public class FileContentStageHandler implements StageHandler {
     /** 单条多值 INSERT 的行数上限。2000 行一次插会撑爆 max_allowed_packet 并长时间锁表 */
     private static final int INSERT_CHUNK = 500;
 
-    private final MfiClientFactory clientFactory;
+    private final AppleClientProvider clientFactory;
     private final TokenFileMapper tokenFileMapper;
     private final TokenMapper tokenMapper;
 
-    public FileContentStageHandler(MfiClientFactory clientFactory, TokenFileMapper tokenFileMapper,
+    public FileContentStageHandler(AppleClientProvider clientFactory, TokenFileMapper tokenFileMapper,
                                    TokenMapper tokenMapper) {
         this.clientFactory = clientFactory;
         this.tokenFileMapper = tokenFileMapper;

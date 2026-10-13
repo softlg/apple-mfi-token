@@ -114,6 +114,16 @@
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
         </dependency>
+        <!--
+          架构守门。上下文之间只靠端口连接，靠约定挡不住一次"顺手 import 了别的上下文的 Mapper"，
+          所以把依赖方向写成测试：方向一旦被破坏，mvn test 直接红。
+        -->
+        <dependency>
+            <groupId>com.tngtech.archunit</groupId>
+            <artifactId>archunit</artifactId>
+            <version>1.3.0</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>

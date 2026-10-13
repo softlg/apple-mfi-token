@@ -3,7 +3,7 @@ package com.galaplat.mfi.issuance.application.pipeline.handler;
 import com.galaplat.mfi.apple.MfiTokenClient;
 import com.galaplat.mfi.apple.MfiUtcTime;
 import com.galaplat.mfi.apple.model.FileNameListResponse;
-import com.galaplat.mfi.credential.infrastructure.client.MfiClientFactory;
+import com.galaplat.mfi.credential.domain.AppleClientProvider;
 import com.galaplat.mfi.issuance.domain.Stage;
 import com.galaplat.mfi.shared.api.BizException;
 import com.galaplat.mfi.issuance.infrastructure.persistence.TokenFilePO;
@@ -30,10 +30,10 @@ import java.util.List;
 @Component
 public class FileNameStageHandler implements StageHandler {
 
-    private final MfiClientFactory clientFactory;
+    private final AppleClientProvider clientFactory;
     private final TokenFileMapper tokenFileMapper;
 
-    public FileNameStageHandler(MfiClientFactory clientFactory, TokenFileMapper tokenFileMapper) {
+    public FileNameStageHandler(AppleClientProvider clientFactory, TokenFileMapper tokenFileMapper) {
         this.clientFactory = clientFactory;
         this.tokenFileMapper = tokenFileMapper;
     }

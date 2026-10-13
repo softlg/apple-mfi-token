@@ -3,7 +3,7 @@ package com.galaplat.mfi.issuance.application.pipeline.handler;
 import com.galaplat.mfi.apple.MfiTokenClient;
 import com.galaplat.mfi.apple.model.BulkUsedAuthEntityRequest;
 import com.galaplat.mfi.apple.model.MfiResponse;
-import com.galaplat.mfi.credential.infrastructure.client.MfiClientFactory;
+import com.galaplat.mfi.credential.domain.AppleClientProvider;
 import com.galaplat.mfi.issuance.domain.Stage;
 import com.galaplat.mfi.identity.domain.TenantConfigKey;
 import com.galaplat.mfi.shared.api.BizException;
@@ -54,7 +54,7 @@ class RegisterStageHandlerTest {
     private static final String PPID = "C00EXAMPLEPPID";
 
     @Mock
-    private MfiClientFactory clientFactory;
+    private AppleClientProvider clientFactory;
     @Mock
     private MfiTokenClient client;
     @Mock

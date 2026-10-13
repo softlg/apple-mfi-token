@@ -7,37 +7,34 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.galaplat.mfi.shared.api.ErrorCode;
 import com.galaplat.mfi.shared.api.PageResult;
 import com.galaplat.mfi.issuance.domain.ApplicationStatus;
+import com.galaplat.mfi.identity.domain.AuditFact;
 import com.galaplat.mfi.identity.domain.OperationAction;
 import com.galaplat.mfi.issuance.domain.Stage;
 import com.galaplat.mfi.issuance.domain.StageStatus;
 import com.galaplat.mfi.identity.domain.TenantConfigKey;
+import com.galaplat.mfi.identity.domain.TenantProfile;
 import com.galaplat.mfi.shared.api.BizException;
 import com.galaplat.mfi.apple.MfiEndpoints;
 import com.galaplat.mfi.credential.application.CredentialService;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationPO;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationPpidPO;
-import com.galaplat.mfi.identity.infrastructure.persistence.OperationLogPO;
-import com.galaplat.mfi.identity.infrastructure.persistence.TenantPO;
-import com.galaplat.mfi.identity.infrastructure.persistence.UserPO;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationMapper;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationPpidMapper;
-import com.galaplat.mfi.identity.infrastructure.persistence.OperationLogMapper;
-import com.galaplat.mfi.ppid.infrastructure.persistence.PpIdMapper;
-import com.galaplat.mfi.identity.infrastructure.persistence.TenantMapper;
-import com.galaplat.mfi.identity.infrastructure.persistence.UserMapper;
+import com.galaplat.mfi.ppid.domain.PpIdAllocation;
 import com.galaplat.mfi.issuance.interfaces.ApplyCreateRequest;
 import com.galaplat.mfi.issuance.interfaces.ApplicationPageRequest;
 import com.galaplat.mfi.issuance.interfaces.ApplicationRetryVo;
 import com.galaplat.mfi.issuance.interfaces.ApplicationShardVo;
 import com.galaplat.mfi.issuance.interfaces.ApplicationVo;
 import com.galaplat.mfi.issuance.interfaces.ApplySubmitVo;
-import com.galaplat.mfi.credential.interfaces.CredentialVo;
-import com.galaplat.mfi.ppid.interfaces.PpIdPlanVo;
 import com.galaplat.mfi.issuance.infrastructure.mq.ShardMessageProducer;
 import com.galaplat.mfi.issuance.infrastructure.mq.StageMessage;
 import com.galaplat.mfi.shared.tenant.TenantAccess;
 import com.galaplat.mfi.issuance.application.ApplicationService;
 import com.galaplat.mfi.issuance.application.ApplicationVoConverter;
+import com.galaplat.mfi.identity.application.AccountReader;
+import com.galaplat.mfi.identity.application.AuditTrail;
+import com.galaplat.mfi.identity.application.TenantProfileReader;
 import com.galaplat.mfi.ppid.application.PpIdService;
 import com.galaplat.mfi.identity.application.TenantConfigService;
 import lombok.extern.slf4j.Slf4j;
@@ -47,7 +44,6 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.security.SecureRandom;
 import java.time.LocalDate;
-import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
@@ -76,10 +72,9 @@ public class ApplicationServiceImpl implements ApplicationService {
 
     private final ApplicationMapper applicationMapper;
     private final ApplicationPpidMapper shardMapper;
-    private final PpIdMapper ppidMapper;
-    private final OperationLogMapper operationLogMapper;
-    private final UserMapper userMapper;
-    private final TenantMapper tenantMapper;
+    private final AuditTrail auditTrail;
+    private final AccountReader accountReader;
+    private final TenantProfileReader tenantProfiles;
     private final PpIdService ppidService;
     private final TenantConfigService configService;
     private final CredentialService credentialService;
@@ -87,16 +82,15 @@ public class ApplicationServiceImpl implements ApplicationService {
     private final TransactionTemplate transactionTemplate;
 
     public ApplicationServiceImpl(ApplicationMapper applicationMapper, ApplicationPpidMapper shardMapper,
-                                  PpIdMapper ppidMapper, OperationLogMapper operationLogMapper,
-                                  UserMapper userMapper, TenantMapper tenantMapper, PpIdService ppidService,
+                                  AuditTrail auditTrail, AccountReader accountReader,
+                                  TenantProfileReader tenantProfiles, PpIdService ppidService,
                                   TenantConfigService configService, CredentialService credentialService,
                                   ShardMessageProducer messageProducer, TransactionTemplate transactionTemplate) {
         this.applicationMapper = applicationMapper;
         this.shardMapper = shardMapper;
-        this.ppidMapper = ppidMapper;
-        this.operationLogMapper = operationLogMapper;
-        this.userMapper = userMapper;
-        this.tenantMapper = tenantMapper;
+        this.auditTrail = auditTrail;
+        this.accountReader = accountReader;
+        this.tenantProfiles = tenantProfiles;
         this.ppidService = ppidService;
         this.configService = configService;
         this.credentialService = credentialService;
@@ -153,21 +147,21 @@ public class ApplicationServiceImpl implements ApplicationService {
     private ApplicationPO doApply(long tenantId, long userId, String productModel, String spu,
                                   int requested, String idempotencyKey) {
         // 与 GET /api/ppid/available 同一条池查询、同一份贪心，预览与真实分配不会有两套语义
-        List<PpIdPlanVo> plan = ppidService.planAllocation(productModel, spu, requested);
-        int allocatable = plan.stream().mapToInt(PpIdPlanVo::getQuantity).sum();
+        List<PpIdAllocation> plan = ppidService.planAllocation(productModel, spu, requested);
+        int allocatable = PpIdAllocation.total(plan);
         if (allocatable < requested) {
             throw new BizException(ErrorCode.BIZ_REJECTED, "额度不足：产品型号 " + productModel + " / SPU " + spu
                     + " 当前可分配 " + allocatable + "，本次需要 " + requested + "，还差 " + (requested - allocatable));
         }
 
-        String applicant = applicantName(userId);
+        String applicant = accountReader.displayName(userId);
         ApplicationPO application = newApplication(tenantId, productModel, spu, requested, plan.size(),
                 applicant, userId, idempotencyKey);
         applicationMapper.insert(application);
 
         List<ApplicationPpidPO> shards = new ArrayList<>(plan.size());
-        for (PpIdPlanVo item : plan) {
-            if (ppidMapper.deduct(tenantId, item.getPpidId(), item.getQuantity()) != 1) {
+        for (PpIdAllocation item : plan) {
+            if (!ppidService.deduct(tenantId, item.ppidId(), item.quantity())) {
                 // 预览说够、这里扣不动，只可能是这中间被别人抢走了。整单失败让用户重看余量，
                 // 而不是把申请量悄悄砍小——砍小之后用户看到的单量与实际申请的 token 数不一致。
                 throw new BizException(ErrorCode.BIZ_REJECTED, "额度刚被其他申请占用，请刷新余量后重新提交");
@@ -175,9 +169,9 @@ public class ApplicationServiceImpl implements ApplicationService {
             ApplicationPpidPO shard = new ApplicationPpidPO();
             shard.setTenantId(tenantId);
             shard.setApplicationId(application.getId());
-            shard.setPpid(item.getPpid());
-            shard.setPpidId(item.getPpidId());
-            shard.setAllocateCount(item.getQuantity());
+            shard.setPpid(item.ppid());
+            shard.setPpidId(item.ppidId());
+            shard.setAllocateCount(item.quantity());
             shard.setStage(Stage.APPLY.name());
             shard.setStageStatus(StageStatus.PENDING.name());
             shards.add(shard);
@@ -200,15 +194,12 @@ public class ApplicationServiceImpl implements ApplicationService {
     // ---- HELPERS ----
 
     /**
-     * 凭证必须存在且未过期才受理申请。这里不构造客户端、不联网，只看库里的元数据：
-     * 申请量一旦扣掉，等到异步阶段才发现证书坏了，用户看到的是一张注定失败的单。
+     * 凭证是否可用于受理申请，判定规则在凭证上下文里（那里才有证书有效期与"缺凭证"的业务语义）。
+     * 这里不构造客户端、不联网，只看库里的元数据：申请量一旦扣掉，等到异步阶段才发现证书坏了，
+     * 用户看到的是一张注定失败的单。
      */
     private void requireUsableCredential(long tenantId) {
-        CredentialVo credential = credentialService.metadata(tenantId);
-        LocalDateTime notAfter = credential.getCertNotAfter();
-        if (notAfter != null && notAfter.isBefore(LocalDateTime.now())) {
-            throw new BizException(ErrorCode.CREDENTIAL_EXPIRED, "租户 MFI 客户端证书已过期，请先更换证书再申请");
-        }
+        credentialService.requireUsable(tenantId);
     }
 
     /**
@@ -252,20 +243,10 @@ public class ApplicationServiceImpl implements ApplicationService {
         return "A" + LocalDate.now().format(NO_DATE) + "-" + suffix;
     }
 
-    /** technology 取发起时的快照；空值落 DEFAULT 哨兵，与客户端工厂注册路径同一个常量 */
+    /** technology 取发起时的快照；租户不存在或未设置时落 DEFAULT 哨兵，与客户端工厂注册路径同一常量 */
     private String appleTechnology(long tenantId) {
-        TenantPO tenant = tenantMapper.selectById(tenantId);
-        String technology = tenant == null ? null : tenant.getAppleTechnology();
-        return hasText(technology) ? technology.trim() : MfiEndpoints.TECHNOLOGY_DEFAULT;
-    }
-
-    /** 姓名快照。账号被删或查不到时用账号兜底，申请单上不能出现空的发起人 */
-    private String applicantName(long userId) {
-        UserPO user = userMapper.selectById(userId);
-        if (user == null) {
-            return "已注销账号";
-        }
-        return hasText(user.getName()) ? user.getName().trim() : user.getAccount();
+        TenantProfile tenant = tenantProfiles.find(tenantId);
+        return tenant == null ? MfiEndpoints.TECHNOLOGY_DEFAULT : tenant.technology();
     }
 
     private ApplicationPO findByIdempotencyKey(long tenantId, String idempotencyKey) {
@@ -279,16 +260,10 @@ public class ApplicationServiceImpl implements ApplicationService {
      * 否则这张表会被排障脚本整行导出，等于把额度明细抄了一份到日志型表里。
      */
     private void writeOperationLog(long tenantId, ApplicationPO application, String applicantName, int shardCount) {
-        OperationLogPO entry = new OperationLogPO();
-        entry.setTenantId(tenantId);
-        entry.setApplicationId(application.getId());
-        entry.setAction(OperationAction.APPLY.name());
-        entry.setOperatorUserId(application.getApplicantUserId());
-        entry.setOperatorName(applicantName);
-        entry.setQuantity(application.getApplyQuantity());
-        entry.setDetail("产品型号 " + application.getProductModel() + " / SPU " + application.getSpu()
-                + "，拆为 " + shardCount + " 份额度");
-        operationLogMapper.insert(entry);
+        auditTrail.append(AuditFact.of(tenantId, application.getId(), null, OperationAction.APPLY,
+                application.getApplicantUserId(), applicantName, application.getApplyQuantity(),
+                "产品型号 " + application.getProductModel() + " / SPU " + application.getSpu()
+                        + "，拆为 " + shardCount + " 份额度"));
     }
 
     @Override
@@ -337,7 +312,7 @@ public class ApplicationServiceImpl implements ApplicationService {
             return retryVo(no, List.of());
         }
 
-        String operator = applicantName(userId);
+        String operator = accountReader.displayName(userId);
         List<ApplicationPpidPO> replayed = transactionTemplate.execute(status -> {
             List<ApplicationPpidPO> done = new ArrayList<>(dead.size());
             for (ApplicationPpidPO shard : dead) {
@@ -373,17 +348,10 @@ public class ApplicationServiceImpl implements ApplicationService {
      */
     private void writeReplayLog(long tenantId, long applicationId, long userId, String operator,
                                 ApplicationPpidPO shard) {
-        OperationLogPO entry = new OperationLogPO();
-        entry.setTenantId(tenantId);
-        entry.setApplicationId(applicationId);
-        entry.setShardId(shard.getId());
-        entry.setAction(OperationAction.RETRY.name());
-        entry.setOperatorUserId(userId);
-        entry.setOperatorName(operator);
-        entry.setQuantity(shard.getAllocateCount());
-        entry.setDetail("人工重放阶段 " + shard.getStage() + "，原失败原因："
-                + (hasText(shard.getLastError()) ? shard.getLastError().trim() : "无留档"));
-        operationLogMapper.insert(entry);
+        auditTrail.append(AuditFact.of(tenantId, applicationId, shard.getId(), OperationAction.RETRY,
+                userId, operator, shard.getAllocateCount(),
+                "人工重放阶段 " + shard.getStage() + "，原失败原因："
+                        + (hasText(shard.getLastError()) ? shard.getLastError().trim() : "无留档")));
     }
 
     private static ApplicationRetryVo retryVo(String applicationNo, List<ApplicationPpidPO> replayed) {

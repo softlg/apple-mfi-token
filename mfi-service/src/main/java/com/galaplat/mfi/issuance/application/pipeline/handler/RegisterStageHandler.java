@@ -3,7 +3,7 @@ package com.galaplat.mfi.issuance.application.pipeline.handler;
 import com.galaplat.mfi.apple.MfiTokenClient;
 import com.galaplat.mfi.apple.model.BulkUsedAuthEntityRequest;
 import com.galaplat.mfi.apple.model.MfiResponse;
-import com.galaplat.mfi.credential.infrastructure.client.MfiClientFactory;
+import com.galaplat.mfi.credential.domain.AppleClientProvider;
 import com.galaplat.mfi.issuance.domain.Stage;
 import com.galaplat.mfi.identity.domain.TenantConfigKey;
 import com.galaplat.mfi.shared.api.BizException;
@@ -33,11 +33,11 @@ import java.util.Map;
 @Component
 public class RegisterStageHandler implements StageHandler {
 
-    private final MfiClientFactory clientFactory;
+    private final AppleClientProvider clientFactory;
     private final TokenMapper tokenMapper;
     private final TenantConfigService configService;
 
-    public RegisterStageHandler(MfiClientFactory clientFactory, TokenMapper tokenMapper,
+    public RegisterStageHandler(AppleClientProvider clientFactory, TokenMapper tokenMapper,
                                TenantConfigService configService) {
         this.clientFactory = clientFactory;
         this.tokenMapper = tokenMapper;

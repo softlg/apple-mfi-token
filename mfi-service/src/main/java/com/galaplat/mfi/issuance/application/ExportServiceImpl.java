@@ -9,17 +9,17 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.galaplat.mfi.shared.api.ErrorCode;
 import com.galaplat.mfi.issuance.domain.ExportFormat;
 import com.galaplat.mfi.issuance.domain.ExportTaskStatus;
+import com.galaplat.mfi.identity.domain.AuditFact;
 import com.galaplat.mfi.identity.domain.OperationAction;
 import com.galaplat.mfi.issuance.domain.TokenStatus;
 import com.galaplat.mfi.shared.api.BizException;
 import com.galaplat.mfi.issuance.config.ExportProperties;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationPO;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ExportTaskPO;
-import com.galaplat.mfi.identity.infrastructure.persistence.OperationLogPO;
 import com.galaplat.mfi.issuance.infrastructure.persistence.TokenPO;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationMapper;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ExportTaskMapper;
-import com.galaplat.mfi.identity.infrastructure.persistence.OperationLogMapper;
+import com.galaplat.mfi.identity.application.AuditTrail;
 import com.galaplat.mfi.issuance.infrastructure.persistence.TokenMapper;
 import com.galaplat.mfi.shared.tenant.TenantContext;
 import com.galaplat.mfi.shared.tenant.TenantPrincipal;
@@ -89,19 +89,19 @@ public class ExportServiceImpl implements ExportService {
     private final ExportTaskMapper exportTaskMapper;
     private final TokenMapper tokenMapper;
     private final ApplicationMapper applicationMapper;
-    private final OperationLogMapper operationLogMapper;
+    private final AuditTrail auditTrail;
     private final ExportProperties properties;
     private final ObjectMapper objectMapper;
     private final Executor exportExecutor;
 
     public ExportServiceImpl(ExportTaskMapper exportTaskMapper, TokenMapper tokenMapper,
-                             ApplicationMapper applicationMapper, OperationLogMapper operationLogMapper,
+                             ApplicationMapper applicationMapper, AuditTrail auditTrail,
                              ExportProperties properties, ObjectMapper objectMapper,
                              @Qualifier("exportExecutor") Executor exportExecutor) {
         this.exportTaskMapper = exportTaskMapper;
         this.tokenMapper = tokenMapper;
         this.applicationMapper = applicationMapper;
-        this.operationLogMapper = operationLogMapper;
+        this.auditTrail = auditTrail;
         this.properties = properties;
         this.objectMapper = objectMapper;
         this.exportExecutor = exportExecutor;
@@ -370,14 +370,9 @@ public class ExportServiceImpl implements ExportService {
 
     /** 留痕只记数量与任务号：产物内容本身是凭证材料，一个字都不该出现在日志表里 */
     private void writeExportLog(long tenantId, long userId, ExportTaskPO task, ExportParams params, int rows) {
-        OperationLogPO entry = new OperationLogPO();
-        entry.setTenantId(tenantId);
-        entry.setApplicationId(params.applicationId());
-        entry.setAction(OperationAction.EXPORT.name());
-        entry.setOperatorUserId(userId);
-        entry.setQuantity(rows);
-        entry.setDetail("导出 " + rows + " 行，格式 " + task.getExportFormat() + "，任务号 " + task.getTaskNo());
-        operationLogMapper.insert(entry);
+        auditTrail.append(AuditFact.of(tenantId, params.applicationId(), null, OperationAction.EXPORT,
+                userId, null, rows,
+                "导出 " + rows + " 行，格式 " + task.getExportFormat() + "，任务号 " + task.getTaskNo()));
     }
 
     private Long requireApplicationId(long tenantId, String applicationNo) {

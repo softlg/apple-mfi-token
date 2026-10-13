@@ -2,7 +2,7 @@ package com.galaplat.mfi.issuance.application.pipeline.handler;
 
 import com.galaplat.mfi.apple.MfiTokenClient;
 import com.galaplat.mfi.apple.model.MfiResponse;
-import com.galaplat.mfi.credential.infrastructure.client.MfiClientFactory;
+import com.galaplat.mfi.credential.domain.AppleClientProvider;
 import com.galaplat.mfi.issuance.domain.Stage;
 import com.galaplat.mfi.shared.api.BizException;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationPpidPO;
@@ -25,9 +25,9 @@ import java.io.IOException;
 @Component
 public class ApplyStageHandler implements StageHandler {
 
-    private final MfiClientFactory clientFactory;
+    private final AppleClientProvider clientFactory;
 
-    public ApplyStageHandler(MfiClientFactory clientFactory) {
+    public ApplyStageHandler(AppleClientProvider clientFactory) {
         this.clientFactory = clientFactory;
     }
 

@@ -11,6 +11,7 @@ import com.galaplat.mfi.shared.api.PageResult;
 import com.galaplat.mfi.shared.api.BizException;
 import com.galaplat.mfi.ppid.infrastructure.persistence.PpIdPO;
 import com.galaplat.mfi.ppid.infrastructure.persistence.PpIdMapper;
+import com.galaplat.mfi.ppid.domain.PpIdAllocation;
 import com.galaplat.mfi.ppid.infrastructure.excel.PpIdExportRow;
 import com.galaplat.mfi.ppid.infrastructure.excel.PpIdImportRow;
 import com.galaplat.mfi.ppid.interfaces.PpIdCreateRequest;
@@ -187,36 +188,48 @@ public class PpIdServiceImpl implements PpIdService {
         vo.setRequestedQuantity(quantity);
         vo.setAllocatableQuantity(allocatable);
         vo.setSufficient(allocatable >= quantity);
-        vo.setPlan(buildPlan(pool, quantity));
+        vo.setPlan(buildPlan(pool, quantity).stream().map(PpIdServiceImpl::toPlanVo).toList());
         return vo;
     }
 
     @Override
-    public List<PpIdPlanVo> planAllocation(String productModel, String spu, int quantity) {
+    public List<PpIdAllocation> planAllocation(String productModel, String spu, int quantity) {
         long tenantId = TenantAccess.requireTenantId();
         return buildPlan(ppidMapper.selectAllocatable(tenantId, requireText(productModel, "产品型号"),
                 requireText(spu, "SPU")), quantity);
     }
 
+    @Override
+    public boolean deduct(long tenantId, long ppidId, int quantity) {
+        // 条件更新由数据库判定：返回 0 就是这一份额度不够或已停用/删除，应用层的读后写一律不参与判定
+        return ppidMapper.deduct(tenantId, ppidId, quantity) == 1;
+    }
+
     /**
      * 贪心拆分：余量多的先用、零头留后，拆出的分片数最少。
      */
-    private List<PpIdPlanVo> buildPlan(List<PpIdPO> pool, int requestedQuantity) {        List<PpIdPlanVo> plan = new ArrayList<>();
+    private List<PpIdAllocation> buildPlan(List<PpIdPO> pool, int requestedQuantity) {
+        List<PpIdAllocation> plan = new ArrayList<>();
         int need = requestedQuantity;
         for (PpIdPO row : pool) {
             if (need <= 0) {
                 break;
             }
             int take = Math.min(need, row.getRemainingQuantity());
-            PpIdPlanVo item = new PpIdPlanVo();
-            item.setPpidId(row.getId());
-            item.setPpid(row.getPpid());
-            item.setQuantity(take);
-            item.setRemainingBefore(row.getRemainingQuantity());
-            plan.add(item);
+            plan.add(new PpIdAllocation(row.getId(), row.getPpid(), take, row.getRemainingQuantity()));
             need -= take;
         }
         return plan;
+    }
+
+    /** 拆分结果的控制台投影：池查询给的是领域分配计划，页面要的是可空字段的 VO */
+    private static PpIdPlanVo toPlanVo(PpIdAllocation allocation) {
+        PpIdPlanVo vo = new PpIdPlanVo();
+        vo.setPpidId(allocation.ppidId());
+        vo.setPpid(allocation.ppid());
+        vo.setQuantity(allocation.quantity());
+        vo.setRemainingBefore(allocation.remainingBefore());
+        return vo;
     }
 
     private LambdaQueryWrapper<PpIdPO> buildFilter(PpIdPageRequest request) {

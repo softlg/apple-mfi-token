@@ -7,15 +7,15 @@ import com.galaplat.mfi.issuance.domain.StageStatus;
 import com.galaplat.mfi.shared.api.BizException;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationPO;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationPpidPO;
-import com.galaplat.mfi.identity.infrastructure.persistence.OperationLogPO;
+import com.galaplat.mfi.identity.domain.AuditFact;
 import com.galaplat.mfi.issuance.infrastructure.persistence.TokenFilePO;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationMapper;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationPpidMapper;
-import com.galaplat.mfi.identity.infrastructure.persistence.OperationLogMapper;
+import com.galaplat.mfi.identity.application.AuditTrail;
 import com.galaplat.mfi.issuance.infrastructure.persistence.TokenFileMapper;
 import com.galaplat.mfi.issuance.infrastructure.persistence.TokenMapper;
 import com.galaplat.mfi.issuance.interfaces.ApplicationDetailVo;
-import com.galaplat.mfi.identity.interfaces.OperationLogVo;
+import com.galaplat.mfi.issuance.interfaces.OperationLogVo;
 import com.galaplat.mfi.issuance.interfaces.StageProgressVo;
 import com.galaplat.mfi.issuance.interfaces.TokenCountVo;
 import com.galaplat.mfi.issuance.interfaces.TokenFileVo;
@@ -47,16 +47,16 @@ public class ApplicationQueryService {
 
     private final ApplicationMapper applicationMapper;
     private final ApplicationPpidMapper shardMapper;
-    private final OperationLogMapper operationLogMapper;
+    private final AuditTrail auditTrail;
     private final TokenFileMapper fileMapper;
     private final TokenMapper tokenMapper;
 
     public ApplicationQueryService(ApplicationMapper applicationMapper, ApplicationPpidMapper shardMapper,
-                                   OperationLogMapper operationLogMapper, TokenFileMapper fileMapper,
+                                   AuditTrail auditTrail, TokenFileMapper fileMapper,
                                    TokenMapper tokenMapper) {
         this.applicationMapper = applicationMapper;
         this.shardMapper = shardMapper;
-        this.operationLogMapper = operationLogMapper;
+        this.auditTrail = auditTrail;
         this.fileMapper = fileMapper;
         this.tokenMapper = tokenMapper;
     }
@@ -156,20 +156,19 @@ public class ApplicationQueryService {
         for (ApplicationPpidPO shard : shards) {
             ppidByShard.put(shard.getId(), shard.getPpid());
         }
-        List<OperationLogPO> rows = new ArrayList<>(
-                operationLogMapper.selectRecentTimeline(tenantId, applicationId, TIMELINE_LIMIT));
+        List<AuditFact> rows = new ArrayList<>(auditTrail.recentTimeline(tenantId, applicationId, TIMELINE_LIMIT));
         Collections.reverse(rows);
         List<OperationLogVo> timeline = new ArrayList<>(rows.size());
-        for (OperationLogPO row : rows) {
+        for (AuditFact row : rows) {
             OperationLogVo vo = new OperationLogVo();
-            vo.setAction(row.getAction());
-            vo.setShardId(row.getShardId());
-            vo.setPpid(row.getShardId() == null ? null : ppidByShard.get(row.getShardId()));
+            vo.setAction(row.action().name());
+            vo.setShardId(row.shardId());
+            vo.setPpid(row.shardId() == null ? null : ppidByShard.get(row.shardId()));
             // 系统动作没有操作人，留痕里的 operator_name 为空，展示成"系统"比空白好读
-            vo.setOperatorName(row.getOperatorName() == null ? "系统" : row.getOperatorName());
-            vo.setQuantity(row.getQuantity());
-            vo.setDetail(row.getDetail());
-            vo.setCreateTime(row.getCreateTime());
+            vo.setOperatorName(row.operatorName() == null ? "系统" : row.operatorName());
+            vo.setQuantity(row.quantity());
+            vo.setDetail(row.detail());
+            vo.setCreateTime(row.createTime());
             timeline.add(vo);
         }
         return timeline;

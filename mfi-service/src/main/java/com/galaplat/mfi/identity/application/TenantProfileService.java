@@ -2,7 +2,7 @@ package com.galaplat.mfi.identity.application;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.galaplat.mfi.apple.MfiEndpoints;
-import com.galaplat.mfi.credential.infrastructure.client.MfiClientFactory;
+import com.galaplat.mfi.credential.domain.AppleClientProvider;
 import com.galaplat.mfi.shared.api.ErrorCode;
 import com.galaplat.mfi.shared.api.BizException;
 import com.galaplat.mfi.identity.infrastructure.persistence.TenantPO;
@@ -24,9 +24,9 @@ import com.galaplat.mfi.shared.tenant.TenantAccess;
 public class TenantProfileService {
 
     private final TenantMapper tenantMapper;
-    private final MfiClientFactory clientFactory;
+    private final AppleClientProvider clientFactory;
 
-    public TenantProfileService(TenantMapper tenantMapper, MfiClientFactory clientFactory) {
+    public TenantProfileService(TenantMapper tenantMapper, AppleClientProvider clientFactory) {
         this.tenantMapper = tenantMapper;
         this.clientFactory = clientFactory;
     }

@@ -2,7 +2,7 @@ package com.galaplat.mfi.issuance.application.pipeline.handler;
 
 import com.galaplat.mfi.apple.MfiTokenClient;
 import com.galaplat.mfi.apple.model.MfiResponse;
-import com.galaplat.mfi.credential.infrastructure.client.MfiClientFactory;
+import com.galaplat.mfi.credential.domain.AppleClientProvider;
 import com.galaplat.mfi.issuance.domain.Stage;
 import com.galaplat.mfi.shared.api.BizException;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationPO;
@@ -36,7 +36,7 @@ class ApplyStageHandlerTest {
     private static final long SHARD_ID = 901L;
 
     @Mock
-    private MfiClientFactory clientFactory;
+    private AppleClientProvider clientFactory;
     @Mock
     private MfiTokenClient client;
 

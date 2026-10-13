@@ -3,7 +3,6 @@ package com.galaplat.mfi.issuance.interfaces;
 import lombok.Data;
 
 import java.util.List;
-import com.galaplat.mfi.identity.interfaces.OperationLogVo;
 import com.galaplat.mfi.issuance.domain.Stage;
 
 /**

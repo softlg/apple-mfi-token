@@ -71,6 +71,20 @@ public class CredentialService {
     }
 
     /**
+     * 受理业务前的门槛：凭证必须存在且未过期。
+     *
+     * <p>判定放在凭证上下文，因为"缺凭证"和"证书过期"是这里的领域规则；申请侧只需要知道能不能受理。
+     * 这里不构造客户端、不联网，只看库里的元数据：额度一旦扣掉，等到异步阶段才发现证书坏了，
+     * 用户看到的是一张注定失败的单。
+     */
+    public void requireUsable(long tenantId) {
+        LocalDateTime notAfter = requireRow(tenantId).getCertNotAfter();
+        if (notAfter != null && notAfter.isBefore(LocalDateTime.now())) {
+            throw new BizException(ErrorCode.CREDENTIAL_EXPIRED, "租户 MFI 客户端证书已过期，请先更换证书再申请");
+        }
+    }
+
+    /**
      * 删除凭证。先 requireRow 保证"删不存在的东西"给出 B0404 而不是静默成功，再物理删掉密文行。
      */
     @Transactional(rollbackFor = Exception.class)

@@ -10,7 +10,6 @@ import org.apache.ibatis.annotations.Update;
 
 import java.util.List;
 import java.util.Map;
-import com.galaplat.mfi.identity.application.MemberServiceImpl;
 
 /**
  * PPID 池。这里的三条写方法是"不超卖"的唯一防线，条件更新由数据库判定，不依赖应用层读后写。
@@ -65,8 +64,8 @@ public interface PpIdMapper extends BaseMapper<PpIdPO> {
                                    @Param("spu") String spu);
 
     /**
-     * 池子总览，按 产品型号 + SPU 聚合。用 Map 而不建投影类，与 {@code MemberServiceImpl}
-     * 里跨租户查租户名的既有做法一致。
+     * 池子总览，按 产品型号 + SPU 聚合。用 Map 而不建投影类，与身份上下文里跨租户查租户名的
+     * 既有做法一致。
      */
     @Select("""
             select product_model, spu,

@@ -1,26 +1,24 @@
 package com.galaplat.mfi.ppid.application;
 
 import com.galaplat.mfi.shared.api.PageResult;
+import com.galaplat.mfi.ppid.domain.PpIdAllocation;
 import com.galaplat.mfi.ppid.interfaces.PpIdCreateRequest;
 import com.galaplat.mfi.ppid.interfaces.PpIdPageRequest;
 import com.galaplat.mfi.ppid.interfaces.PpIdUpdateRequest;
 import com.galaplat.mfi.ppid.interfaces.PpIdAvailableVo;
 import com.galaplat.mfi.ppid.interfaces.PpIdImportResultVo;
-import com.galaplat.mfi.ppid.interfaces.PpIdPlanVo;
 import com.galaplat.mfi.ppid.interfaces.PpIdStatsVo;
 import com.galaplat.mfi.ppid.interfaces.PpIdVo;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.util.List;
-import com.galaplat.mfi.ppid.infrastructure.excel.PpIdImportRow;
-import com.galaplat.mfi.ppid.infrastructure.persistence.PpIdMapper;
 
 /**
  * PPID 池：租户从苹果侧拿到的可申请额度在本系统里的唯一账本。
  *
- * <p>这里只管账，不管扣减。扣减（{@code PpIdMapper.deduct}）必须发生在申请事务里，与申请单、分片一起
- * 提交或回滚，所以它属于 P4 的申请服务而不是本服务。
+ * <p>扣减（{@link #deduct}）由申请事务调用，而不是本服务的某个方法内部完成——额度必须与申请单、
+ * 分片一起提交或回滚，所以调用方持有事务。本服务只保证扣减是数据库判定的条件更新。
  */
 public interface PpIdService {
 
@@ -54,9 +52,17 @@ public interface PpIdService {
      * 同一个排序，所以预览看到的拆分就是申请会做的拆分——两处各写一套分配顺序，是 MES 里
      * "预估说够、提交说不够"的来源。
      *
-     * <p>不加锁、不校验租户规则：判定余量的是随后的条件更新。
+     * <p>不加锁、不校验租户规则：判定余量的是随后的 {@link #deduct}。
      */
-    List<PpIdPlanVo> planAllocation(String productModel, String spu, int quantity);
+    List<PpIdAllocation> planAllocation(String productModel, String spu, int quantity);
+
+    /**
+     * 扣减一份额度的余量，由数据库用条件更新判定够不够：返回 false 就是这一份额度在这一刻不够或已被占用。
+     *
+     * <p>这里刻意不加 {@code @Transactional}：扣减必须参与调用方（申请）的事务，与申请单、分片同生同死。
+     * 另起事务会把扣减变成不可回滚的独立提交，失败的申请就会吃掉额度。
+     */
+    boolean deduct(long tenantId, long ppidId, int quantity);
 
     PpIdImportResultVo importExcel(MultipartFile file);
 

@@ -7,23 +7,22 @@ import com.galaplat.mfi.issuance.config.PipelineProperties;
 import com.galaplat.mfi.credential.application.CredentialService;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationPO;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationPpidPO;
-import com.galaplat.mfi.identity.infrastructure.persistence.OperationLogPO;
-import com.galaplat.mfi.identity.infrastructure.persistence.TenantPO;
-import com.galaplat.mfi.identity.infrastructure.persistence.UserPO;
+import com.galaplat.mfi.identity.domain.AuditFact;
+import com.galaplat.mfi.identity.domain.OperationAction;
+import com.galaplat.mfi.identity.domain.TenantProfile;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationMapper;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationPpidMapper;
-import com.galaplat.mfi.identity.infrastructure.persistence.OperationLogMapper;
-import com.galaplat.mfi.ppid.infrastructure.persistence.PpIdMapper;
-import com.galaplat.mfi.identity.infrastructure.persistence.TenantMapper;
-import com.galaplat.mfi.identity.infrastructure.persistence.UserMapper;
+import com.galaplat.mfi.identity.application.AccountReader;
+import com.galaplat.mfi.identity.application.AuditTrail;
+import com.galaplat.mfi.identity.application.TenantProfileReader;
+import com.galaplat.mfi.ppid.domain.PpIdAllocation;
+import com.galaplat.mfi.shared.api.ErrorCode;
 import com.galaplat.mfi.shared.tenant.TenantContext;
 import com.galaplat.mfi.shared.tenant.TenantPrincipal;
 import com.galaplat.mfi.issuance.interfaces.ApplyCreateRequest;
 import com.galaplat.mfi.issuance.interfaces.ApplicationRetryVo;
 import com.galaplat.mfi.issuance.interfaces.ApplicationShardVo;
 import com.galaplat.mfi.issuance.interfaces.ApplySubmitVo;
-import com.galaplat.mfi.credential.interfaces.CredentialVo;
-import com.galaplat.mfi.ppid.interfaces.PpIdPlanVo;
 import com.galaplat.mfi.issuance.infrastructure.mq.PipelineNames;
 import com.galaplat.mfi.issuance.infrastructure.mq.RabbitTopology;
 import com.galaplat.mfi.issuance.infrastructure.mq.ShardMessageProducer;
@@ -50,7 +49,6 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 import org.springframework.transaction.support.TransactionCallback;
 import org.springframework.transaction.support.TransactionTemplate;
 
-import java.time.LocalDateTime;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -63,6 +61,7 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -86,13 +85,11 @@ class ApplicationServiceImplTest {
     @Mock
     private ApplicationPpidMapper shardMapper;
     @Mock
-    private PpIdMapper ppidMapper;
+    private AuditTrail auditTrail;
     @Mock
-    private OperationLogMapper operationLogMapper;
+    private AccountReader accountReader;
     @Mock
-    private UserMapper userMapper;
-    @Mock
-    private TenantMapper tenantMapper;
+    private TenantProfileReader tenantProfiles;
     @Mock
     private PpIdService ppidService;
     @Mock
@@ -113,22 +110,21 @@ class ApplicationServiceImplTest {
         TenantContext.bind(new TenantPrincipal(TENANT_ID, USER_ID, true));
 
         producer = new ShardMessageProducer(rabbitTemplate, new PipelineNames(new PipelineProperties()));
-        service = new ApplicationServiceImpl(applicationMapper, shardMapper, ppidMapper, operationLogMapper,
-                userMapper, tenantMapper, ppidService, configService, credentialService, producer, transactionTemplate);
+        service = new ApplicationServiceImpl(applicationMapper, shardMapper, auditTrail, accountReader,
+                tenantProfiles, ppidService, configService, credentialService, producer, transactionTemplate);
 
         // TransactionTemplate 在单测里只承担"把回调跑一遍"，真正要验的是回调里登记的提交后回调
         doAnswer(invocation -> ((TransactionCallback<?>) invocation.getArgument(0)).doInTransaction(null))
                 .when(transactionTemplate).execute(any());
 
-        when(userMapper.selectById(USER_ID)).thenReturn(user("张三"));
-        when(tenantMapper.selectById(TENANT_ID)).thenReturn(tenant("HomeKit"));
-        when(credentialService.metadata(TENANT_ID)).thenReturn(credential(LocalDateTime.now().plusDays(30)));
+        when(accountReader.displayName(USER_ID)).thenReturn("张三");
+        when(tenantProfiles.find(TENANT_ID)).thenReturn(new TenantProfile(null, "HomeKit"));
         when(configService.intValue(eq(TENANT_ID), any())).thenReturn(0);
         when(applicationMapper.insert(any(ApplicationPO.class))).thenAnswer(invocation -> {
             invocation.getArgument(0, ApplicationPO.class).setId(APPLICATION_ID);
             return 1;
         });
-        when(ppidMapper.deduct(anyLong(), anyLong(), anyInt())).thenReturn(1);
+        when(ppidService.deduct(anyLong(), anyLong(), anyInt())).thenReturn(true);
         when(shardMapper.selectByApplication(TENANT_ID, APPLICATION_ID))
                 .thenReturn(List.of(shard(901L, "PPID-BIG", 100), shard(902L, "PPID-SMALL", 20)));
         // 模拟请求线程：事务同步已激活，正是 TransactionTemplate 内部的真实状态
@@ -155,8 +151,8 @@ class ApplicationServiceImplTest {
         assertEquals(2, vo.getPpidCount());
         assertEquals(List.of(100, 20), vo.getShards().stream().map(s -> s.getAllocateCount()).toList());
         assertEquals(false, vo.getDuplicated());
-        verify(ppidMapper).deduct(TENANT_ID, 11L, 100);
-        verify(ppidMapper).deduct(TENANT_ID, 12L, 20);
+        verify(ppidService).deduct(TENANT_ID, 11L, 100);
+        verify(ppidService).deduct(TENANT_ID, 12L, 20);
         verify(shardMapper).insertBatch(anyList());
 
         // 关键断言：受理成功不等于可以开工。此刻一条消息都不该离开进程
@@ -178,7 +174,7 @@ class ApplicationServiceImplTest {
     void deductConflictLeavesNoMessageToCommit() {
         when(ppidService.planAllocation("Model-A", "SPU-1", 120))
                 .thenReturn(List.of(plan(11L, "PPID-BIG", 100), plan(12L, "PPID-SMALL", 20)));
-        when(ppidMapper.deduct(TENANT_ID, 12L, 20)).thenReturn(0);
+        when(ppidService.deduct(TENANT_ID, 12L, 20)).thenReturn(false);
 
         BizException e = assertThrows(BizException.class, () -> service.submit(request(120)));
         assertTrue(e.getMessage().contains("刷新"), e.getMessage());
@@ -197,7 +193,7 @@ class ApplicationServiceImplTest {
 
         BizException e = assertThrows(BizException.class, () -> service.submit(request(136)));
         assertTrue(e.getMessage().contains("还差 6"), e.getMessage());
-        verify(ppidMapper, never()).deduct(anyLong(), anyLong(), anyInt());
+        verify(ppidService, never()).deduct(anyLong(), anyLong(), anyInt());
         verify(applicationMapper, never()).insert(any(ApplicationPO.class));
     }
 
@@ -208,15 +204,16 @@ class ApplicationServiceImplTest {
         BizException e = assertThrows(BizException.class, () -> service.submit(request(101)));
         assertTrue(e.getMessage().contains("100"), e.getMessage());
         verify(ppidService, never()).planAllocation(any(), any(), anyInt());
-        verify(ppidMapper, never()).deduct(anyLong(), anyLong(), anyInt());
+        verify(ppidService, never()).deduct(anyLong(), anyLong(), anyInt());
     }
 
     @Test
     void expiredCredentialFailsFastWithoutConsumingQuota() {
-        when(credentialService.metadata(TENANT_ID)).thenReturn(credential(LocalDateTime.now().minusDays(1)));
+        doThrow(new BizException(ErrorCode.CREDENTIAL_EXPIRED, "租户 MFI 客户端证书已过期，请先更换证书再申请"))
+                .when(credentialService).requireUsable(TENANT_ID);
 
         assertThrows(BizException.class, () -> service.submit(request(10)));
-        verify(ppidMapper, never()).deduct(anyLong(), anyLong(), anyInt());
+        verify(ppidService, never()).deduct(anyLong(), anyLong(), anyInt());
         verify(applicationMapper, never()).insert(any(ApplicationPO.class));
     }
 
@@ -238,7 +235,7 @@ class ApplicationServiceImplTest {
 
         assertEquals("A261010-ABCDEFGH", vo.getApplicationNo());
         assertEquals(true, vo.getDuplicated());
-        verify(ppidMapper, never()).deduct(anyLong(), anyLong(), anyInt());
+        verify(ppidService, never()).deduct(anyLong(), anyLong(), anyInt());
         verify(transactionTemplate, never()).execute(any());
     }
 
@@ -266,7 +263,7 @@ class ApplicationServiceImplTest {
         assertEquals("A261010-ZZZZZZZZ", vo.getApplicationNo());
         assertEquals(true, vo.getDuplicated());
         // 插单先于扣减，所以这条路径连额度都没碰过
-        verify(ppidMapper, never()).deduct(anyLong(), anyLong(), anyInt());
+        verify(ppidService, never()).deduct(anyLong(), anyLong(), anyInt());
     }
 
     @Test
@@ -283,7 +280,6 @@ class ApplicationServiceImplTest {
     @Test
     void applicantNameAndTechnologyAreSnapshotted() {
         when(ppidService.planAllocation("Model-A", "SPU-1", 10)).thenReturn(List.of(plan(11L, "PPID-BIG", 10)));
-        when(tenantMapper.selectById(TENANT_ID)).thenReturn(tenant("HomeKit"));
 
         ArgumentCaptor<ApplicationPO> captor = ArgumentCaptor.forClass(ApplicationPO.class);
         service.submit(request(10));
@@ -335,13 +331,13 @@ class ApplicationServiceImplTest {
                 .allMatch(m -> ((StageMessage) m).traceId().endsWith("#retry")));
 
         // 死因在复位前抄进留痕，复位之后库里就没了——排障要能看到"为什么重放"
-        ArgumentCaptor<OperationLogPO> logs = ArgumentCaptor.forClass(OperationLogPO.class);
-        verify(operationLogMapper, times(2)).insert(logs.capture());
-        OperationLogPO entry = logs.getAllValues().get(0);
-        assertEquals("RETRY", entry.getAction());
-        assertEquals("张三", entry.getOperatorName());
-        assertEquals(901L, entry.getShardId());
-        assertTrue(entry.getDetail().contains("苹果 500 服务异常"), entry.getDetail());
+        ArgumentCaptor<AuditFact> logs = ArgumentCaptor.forClass(AuditFact.class);
+        verify(auditTrail, times(2)).append(logs.capture());
+        AuditFact entry = logs.getAllValues().get(0);
+        assertEquals(OperationAction.RETRY, entry.action());
+        assertEquals("张三", entry.operatorName());
+        assertEquals(901L, entry.shardId().longValue());
+        assertTrue(entry.detail().contains("苹果 500 服务异常"), entry.detail());
     }
 
     @Test
@@ -377,7 +373,7 @@ class ApplicationServiceImplTest {
         verify(rabbitTemplate, times(1)).convertAndSend(eq(RabbitTopology.EXCHANGE_NORMAL),
                 eq(RabbitTopology.QUEUE_FINISH), payloads.capture(), any(MessagePostProcessor.class));
         assertEquals(902L, ((StageMessage) payloads.getValue()).shardId());
-        verify(operationLogMapper, times(1)).insert(any(OperationLogPO.class));
+        verify(auditTrail, times(1)).append(any(AuditFact.class));
     }
 
     @Test
@@ -405,27 +401,6 @@ class ApplicationServiceImplTest {
         verify(shardMapper, never()).selectDeadByApplication(anyLong(), anyLong());
     }
 
-
-    private static UserPO user(String name) {
-        UserPO row = new UserPO();
-        row.setId(USER_ID);
-        row.setAccount("zhangsan");
-        row.setName(name);
-        return row;
-    }
-
-    private static TenantPO tenant(String technology) {
-        TenantPO row = new TenantPO();
-        row.setId(TENANT_ID);
-        row.setAppleTechnology(technology);
-        return row;
-    }
-
-    private static CredentialVo credential(LocalDateTime notAfter) {
-        CredentialVo vo = new CredentialVo();
-        vo.setCertNotAfter(notAfter);
-        return vo;
-    }
 
     private static ApplicationPpidPO shard(long id, String ppid, int allocateCount) {
         ApplicationPpidPO row = new ApplicationPpidPO();
@@ -461,12 +436,8 @@ class ApplicationServiceImplTest {
         return row;
     }
 
-    private static PpIdPlanVo plan(long ppidId, String ppid, int quantity) {
-        PpIdPlanVo vo = new PpIdPlanVo();
-        vo.setPpidId(ppidId);
-        vo.setPpid(ppid);
-        vo.setQuantity(quantity);
-        return vo;
+    private static PpIdAllocation plan(long ppidId, String ppid, int quantity) {
+        return new PpIdAllocation(ppidId, ppid, quantity, quantity);
     }
 
     private static ApplyCreateRequest request(int quantity) {

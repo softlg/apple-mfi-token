@@ -4,13 +4,14 @@ import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import com.galaplat.mfi.apple.MfiTokenClient;
 import com.galaplat.mfi.apple.model.MfiResponse;
-import com.galaplat.mfi.credential.infrastructure.client.MfiClientFactory;
+import com.galaplat.mfi.credential.domain.AppleClientProvider;
 import com.galaplat.mfi.shared.api.BizException;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationPO;
-import com.galaplat.mfi.identity.infrastructure.persistence.OperationLogPO;
+import com.galaplat.mfi.identity.domain.AuditFact;
+import com.galaplat.mfi.identity.domain.OperationAction;
 import com.galaplat.mfi.issuance.infrastructure.persistence.TokenPO;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationMapper;
-import com.galaplat.mfi.identity.infrastructure.persistence.OperationLogMapper;
+import com.galaplat.mfi.identity.application.AuditTrail;
 import com.galaplat.mfi.issuance.infrastructure.persistence.TokenMapper;
 import com.galaplat.mfi.shared.tenant.TenantContext;
 import com.galaplat.mfi.shared.tenant.TenantPrincipal;
@@ -70,9 +71,9 @@ class TokenDestroyServiceTest {
     @Mock
     private ApplicationMapper applicationMapper;
     @Mock
-    private OperationLogMapper operationLogMapper;
+    private AuditTrail auditTrail;
     @Mock
-    private MfiClientFactory clientFactory;
+    private AppleClientProvider clientFactory;
     @Mock
     private MfiTokenClient client;
 
@@ -83,7 +84,7 @@ class TokenDestroyServiceTest {
         TableInfoHelper.initTableInfo(new MapperBuilderAssistant(new MybatisConfiguration(), ""),
                 ApplicationPO.class);
         TenantContext.bind(new TenantPrincipal(TENANT_ID, OWNER_ID, true));
-        service = new TokenDestroyService(tokenMapper, applicationMapper, operationLogMapper, clientFactory);
+        service = new TokenDestroyService(tokenMapper, applicationMapper, auditTrail, clientFactory);
 
         when(applicationMapper.selectOne(any())).thenReturn(application());
         when(clientFactory.forTenant(TENANT_ID)).thenReturn(client);
@@ -103,7 +104,7 @@ class TokenDestroyServiceTest {
 
         BizException e = assertThrows(BizException.class, () -> service.destroy(request(APPLICATION_NO)));
         assertTrue(e.getMessage().contains("owner"), e.getMessage());
-        verifyNoInteractions(tokenMapper, applicationMapper, clientFactory, operationLogMapper);
+        verifyNoInteractions(tokenMapper, applicationMapper, clientFactory, auditTrail);
     }
 
     @Test
@@ -115,7 +116,7 @@ class TokenDestroyServiceTest {
         assertThrows(BizException.class, () -> service.destroy(request(null)));
 
         verify(tokenMapper, never()).selectDestroyCandidates(anyLong(), anyLong(), any(), anyInt());
-        verifyNoInteractions(clientFactory, operationLogMapper);
+        verifyNoInteractions(clientFactory, auditTrail);
     }
 
     @Test
@@ -124,7 +125,7 @@ class TokenDestroyServiceTest {
 
         BizException e = assertThrows(BizException.class, () -> service.destroy(request(APPLICATION_NO)));
         assertTrue(e.getMessage().contains("不属于当前租户"), e.getMessage());
-        verifyNoInteractions(clientFactory, tokenMapper, operationLogMapper);
+        verifyNoInteractions(clientFactory, tokenMapper, auditTrail);
     }
 
     @Test
@@ -153,11 +154,11 @@ class TokenDestroyServiceTest {
         assertFalse(vo.isHasMore());
         assertNull(vo.getFailReason());
 
-        ArgumentCaptor<OperationLogPO> logs = ArgumentCaptor.forClass(OperationLogPO.class);
-        verify(operationLogMapper).insert(logs.capture());
-        assertEquals("DESTROY", logs.getValue().getAction());
-        assertEquals(121, logs.getValue().getQuantity().intValue());
-        assertEquals(APPLICATION_ID, logs.getValue().getApplicationId().longValue());
+        ArgumentCaptor<AuditFact> logs = ArgumentCaptor.forClass(AuditFact.class);
+        verify(auditTrail).append(logs.capture());
+        assertEquals(OperationAction.DESTROY, logs.getValue().action());
+        assertEquals(121, logs.getValue().quantity().intValue());
+        assertEquals(APPLICATION_ID, logs.getValue().applicationId().longValue());
     }
 
     @Test
@@ -180,10 +181,10 @@ class TokenDestroyServiceTest {
         assertTrue(vo.isHasMore(), "被拒的批次还在库里是 ISSUED，得告诉用户可以再来一次");
         assertTrue(vo.getFailReason().contains("AUTH_ENTITY_NOT_UNUSED"), vo.getFailReason());
 
-        ArgumentCaptor<OperationLogPO> logs = ArgumentCaptor.forClass(OperationLogPO.class);
-        verify(operationLogMapper).insert(logs.capture());
-        assertEquals(100, logs.getValue().getQuantity().intValue());
-        assertTrue(logs.getValue().getDetail().contains("中止"), logs.getValue().getDetail());
+        ArgumentCaptor<AuditFact> logs = ArgumentCaptor.forClass(AuditFact.class);
+        verify(auditTrail).append(logs.capture());
+        assertEquals(100, logs.getValue().quantity().intValue());
+        assertTrue(logs.getValue().detail().contains("中止"), logs.getValue().detail());
     }
 
     @Test
@@ -200,7 +201,7 @@ class TokenDestroyServiceTest {
         assertTrue(vo.isHasMore());
         assertTrue(vo.getFailReason().contains("未能送达"), vo.getFailReason());
         // 一次都没成功也要留痕：谁在什么时候试图销毁过什么，是审计要问的
-        verify(operationLogMapper).insert(any(OperationLogPO.class));
+        verify(auditTrail).append(any(AuditFact.class));
     }
 
     @Test
@@ -214,7 +215,7 @@ class TokenDestroyServiceTest {
         assertFalse(vo.isHasMore());
         assertNull(vo.getFailReason());
         verifyNoInteractions(clientFactory);
-        verify(operationLogMapper, never()).insert(any(OperationLogPO.class));
+        verify(auditTrail, never()).append(any(AuditFact.class));
     }
 
     @Test
@@ -242,9 +243,9 @@ class TokenDestroyServiceTest {
 
         service.destroy(request(APPLICATION_NO));
 
-        ArgumentCaptor<OperationLogPO> logs = ArgumentCaptor.forClass(OperationLogPO.class);
-        verify(operationLogMapper).insert(logs.capture());
-        String detail = logs.getValue().getDetail();
+        ArgumentCaptor<AuditFact> logs = ArgumentCaptor.forClass(AuditFact.class);
+        verify(auditTrail).append(logs.capture());
+        String detail = logs.getValue().detail();
         assertFalse(detail.contains(PPID_A), detail);
         assertFalse(detail.contains("AUTH-101"), detail);
     }
@@ -259,7 +260,7 @@ class TokenDestroyServiceTest {
         BizException e = assertThrows(BizException.class, () -> service.destroy(request(APPLICATION_NO)));
         assertTrue(e.getMessage().contains("tokenId=101"), e.getMessage());
         verifyNoInteractions(clientFactory);
-        verify(operationLogMapper, never()).insert(any(OperationLogPO.class));
+        verify(auditTrail, never()).append(any(AuditFact.class));
     }
 
     /** 苹果的销毁请求按 PPID 定位额度，所以归堆结果必须与候选行的 PPID 一致 */

@@ -5,17 +5,18 @@ import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import com.galaplat.mfi.shared.api.BizException;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationPO;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationPpidPO;
-import com.galaplat.mfi.identity.infrastructure.persistence.OperationLogPO;
+import com.galaplat.mfi.identity.application.AuditTrail;
+import com.galaplat.mfi.identity.domain.AuditFact;
+import com.galaplat.mfi.identity.domain.OperationAction;
 import com.galaplat.mfi.issuance.infrastructure.persistence.TokenFilePO;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationMapper;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationPpidMapper;
-import com.galaplat.mfi.identity.infrastructure.persistence.OperationLogMapper;
 import com.galaplat.mfi.issuance.infrastructure.persistence.TokenFileMapper;
 import com.galaplat.mfi.issuance.infrastructure.persistence.TokenMapper;
 import com.galaplat.mfi.shared.tenant.TenantContext;
 import com.galaplat.mfi.shared.tenant.TenantPrincipal;
 import com.galaplat.mfi.issuance.interfaces.ApplicationDetailVo;
-import com.galaplat.mfi.identity.interfaces.OperationLogVo;
+import com.galaplat.mfi.issuance.interfaces.OperationLogVo;
 import com.galaplat.mfi.issuance.interfaces.StageProgressVo;
 import com.galaplat.mfi.issuance.interfaces.TokenFileVo;
 import com.galaplat.mfi.issuance.interfaces.TokenCountVo;
@@ -62,7 +63,7 @@ class ApplicationQueryServiceTest {
     @Mock
     private ApplicationPpidMapper shardMapper;
     @Mock
-    private OperationLogMapper operationLogMapper;
+    private AuditTrail auditTrail;
     @Mock
     private TokenFileMapper fileMapper;
     @Mock
@@ -74,7 +75,7 @@ class ApplicationQueryServiceTest {
     void setUp() {
         TableInfoHelper.initTableInfo(new MapperBuilderAssistant(new MybatisConfiguration(), ""), ApplicationPO.class);
         TenantContext.bind(new TenantPrincipal(TENANT_ID, 42L, true));
-        service = new ApplicationQueryService(applicationMapper, shardMapper, operationLogMapper, fileMapper,
+        service = new ApplicationQueryService(applicationMapper, shardMapper, auditTrail, fileMapper,
                 tokenMapper);
         when(applicationMapper.selectOne(any())).thenReturn(application());
     }
@@ -131,10 +132,11 @@ class ApplicationQueryServiceTest {
         when(shardMapper.selectByApplication(TENANT_ID, APPLICATION_ID)).thenReturn(List.of(
                 shard(901L, "PPID-A", 100, "FILE_NAME", "PENDING", null)));
         // 留痕按 id 倒序取回（截断取的是最近若干条），读侧要翻成正序
-        when(operationLogMapper.selectRecentTimeline(eq(TENANT_ID), eq(APPLICATION_ID), eq(500)))
-                .thenReturn(List.of(log(3L, "STAGE_ADVANCE", 901L, null, "阶段 FILE_NAME 完成，进入 FILE_CONTENT"),
-                        log(2L, "RETRY", 901L, null, "阶段 APPLY 第 1 次重试：苹果 503"),
-                        log(1L, "APPLY", null, "张三", "产品型号 M / SPU S，拆为 1 份额度")));
+        when(auditTrail.recentTimeline(eq(TENANT_ID), eq(APPLICATION_ID), eq(500)))
+                .thenReturn(List.of(log(OperationAction.STAGE_ADVANCE, 901L, null,
+                                "阶段 FILE_NAME 完成，进入 FILE_CONTENT"),
+                        log(OperationAction.RETRY, 901L, null, "阶段 APPLY 第 1 次重试：苹果 503"),
+                        log(OperationAction.APPLY, null, "张三", "产品型号 M / SPU S，拆为 1 份额度")));
 
         List<OperationLogVo> timeline = service.detail(APPLICATION_NO).getTimeline();
 
@@ -237,17 +239,9 @@ class ApplicationQueryServiceTest {
         return shard;
     }
 
-    private static OperationLogPO log(long id, String action, Long shardId, String operator, String detail) {
-        OperationLogPO entry = new OperationLogPO();
-        entry.setId(id);
-        entry.setTenantId(TENANT_ID);
-        entry.setApplicationId(APPLICATION_ID);
-        entry.setShardId(shardId);
-        entry.setAction(action);
-        entry.setOperatorName(operator);
-        entry.setDetail(detail);
-        entry.setCreateTime(LocalDateTime.now());
-        return entry;
+    private static AuditFact log(OperationAction action, Long shardId, String operator, String detail) {
+        return new AuditFact(TENANT_ID, APPLICATION_ID, shardId, action, null, operator, 1, detail,
+                LocalDateTime.now());
     }
 
 }

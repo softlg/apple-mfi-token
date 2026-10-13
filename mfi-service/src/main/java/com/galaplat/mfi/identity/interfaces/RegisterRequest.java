@@ -1,4 +1,4 @@
-package com.galaplat.mfi.issuance.interfaces;
+package com.galaplat.mfi.identity.interfaces;
 
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;

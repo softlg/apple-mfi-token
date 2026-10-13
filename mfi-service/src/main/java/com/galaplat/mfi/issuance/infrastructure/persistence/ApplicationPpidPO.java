@@ -10,7 +10,6 @@ import lombok.Data;
 import java.time.LocalDateTime;
 import com.galaplat.mfi.issuance.domain.Stage;
 import com.galaplat.mfi.issuance.domain.StageStatus;
-import com.galaplat.mfi.ppid.infrastructure.persistence.PpIdPO;
 
 /**
  * 申请单的一个 PPID 分片，同时是异步流水线的推进位。
@@ -31,7 +30,7 @@ public class ApplicationPpidPO {
 
     private String ppid;
 
-    /** 指向 {@link PpIdPO#getId()}，回滚额度时要按这一行扣回去 */
+    /** 指向 {@code t_ppid.id}，回滚额度时要按这一行扣回去 */
     private Long ppidId;
 
     private Integer allocateCount;

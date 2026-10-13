@@ -3,7 +3,7 @@ package com.galaplat.mfi.issuance.application.pipeline.handler;
 import com.galaplat.mfi.apple.MfiTokenClient;
 import com.galaplat.mfi.apple.model.TokenFileRow;
 import com.galaplat.mfi.apple.model.TokenFileDownload;
-import com.galaplat.mfi.credential.infrastructure.client.MfiClientFactory;
+import com.galaplat.mfi.credential.domain.AppleClientProvider;
 import com.galaplat.mfi.issuance.domain.Stage;
 import com.galaplat.mfi.shared.api.BizException;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationPO;
@@ -56,7 +56,7 @@ class FileContentStageHandlerTest {
     private static final String FILE_NAME = "tokens-1.xlsx";
 
     @Mock
-    private MfiClientFactory clientFactory;
+    private AppleClientProvider clientFactory;
     @Mock
     private MfiTokenClient client;
     @Mock

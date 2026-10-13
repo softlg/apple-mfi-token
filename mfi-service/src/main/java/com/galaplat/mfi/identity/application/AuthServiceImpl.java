@@ -15,7 +15,7 @@ import com.galaplat.mfi.identity.infrastructure.persistence.UserMapper;
 import com.galaplat.mfi.shared.tenant.TenantContext;
 import com.galaplat.mfi.shared.tenant.TenantPrincipal;
 import com.galaplat.mfi.identity.interfaces.LoginRequest;
-import com.galaplat.mfi.issuance.interfaces.RegisterRequest;
+import com.galaplat.mfi.identity.interfaces.RegisterRequest;
 import com.galaplat.mfi.identity.interfaces.LoginVo;
 import com.galaplat.mfi.identity.interfaces.ProfileVo;
 import com.galaplat.mfi.identity.interfaces.TenantBriefVo;

@@ -1,7 +1,7 @@
 package com.galaplat.mfi.credential.interfaces;
 
 import com.galaplat.mfi.credential.application.MfiProbeService;
-import com.galaplat.mfi.credential.infrastructure.client.MfiClientFactory;
+import com.galaplat.mfi.credential.domain.AppleClientProvider;
 import com.galaplat.mfi.credential.application.CredentialService;
 import com.galaplat.mfi.credential.interfaces.CredentialUploadRequest;
 import com.galaplat.mfi.credential.interfaces.CredentialVerifyVo;
@@ -29,10 +29,10 @@ import org.springframework.web.bind.annotation.RestController;
 public class TenantCredentialController {
 
     private final CredentialService credentialService;
-    private final MfiClientFactory clientFactory;
+    private final AppleClientProvider clientFactory;
     private final MfiProbeService probeService;
 
-    public TenantCredentialController(CredentialService credentialService, MfiClientFactory clientFactory,
+    public TenantCredentialController(CredentialService credentialService, AppleClientProvider clientFactory,
                                       MfiProbeService probeService) {
         this.credentialService = credentialService;
         this.clientFactory = clientFactory;

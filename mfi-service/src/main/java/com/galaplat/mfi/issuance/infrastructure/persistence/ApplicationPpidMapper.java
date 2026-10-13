@@ -12,7 +12,6 @@ import org.apache.ibatis.annotations.Update;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
-import com.galaplat.mfi.ppid.infrastructure.persistence.PpIdMapper;
 
 /**
  * 申请分片，同时是异步流水线的推进位。一次申请拆出的分片数通常个位数，但批量插入仍走多值语句：

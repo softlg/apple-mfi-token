@@ -3,15 +3,15 @@ package com.galaplat.mfi.issuance.application;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.galaplat.mfi.apple.MfiTokenClient;
 import com.galaplat.mfi.apple.model.MfiResponse;
-import com.galaplat.mfi.credential.infrastructure.client.MfiClientFactory;
+import com.galaplat.mfi.credential.domain.AppleClientProvider;
 import com.galaplat.mfi.shared.api.ErrorCode;
+import com.galaplat.mfi.identity.domain.AuditFact;
 import com.galaplat.mfi.identity.domain.OperationAction;
 import com.galaplat.mfi.shared.api.BizException;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationPO;
-import com.galaplat.mfi.identity.infrastructure.persistence.OperationLogPO;
 import com.galaplat.mfi.issuance.infrastructure.persistence.TokenPO;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationMapper;
-import com.galaplat.mfi.identity.infrastructure.persistence.OperationLogMapper;
+import com.galaplat.mfi.identity.application.AuditTrail;
 import com.galaplat.mfi.issuance.infrastructure.persistence.TokenMapper;
 import com.galaplat.mfi.issuance.interfaces.TokenDestroyRequest;
 import com.galaplat.mfi.issuance.interfaces.TokenDestroyVo;
@@ -53,14 +53,14 @@ public class TokenDestroyService {
 
     private final TokenMapper tokenMapper;
     private final ApplicationMapper applicationMapper;
-    private final OperationLogMapper operationLogMapper;
-    private final MfiClientFactory clientFactory;
+    private final AuditTrail auditTrail;
+    private final AppleClientProvider clientFactory;
 
     public TokenDestroyService(TokenMapper tokenMapper, ApplicationMapper applicationMapper,
-                               OperationLogMapper operationLogMapper, MfiClientFactory clientFactory) {
+                               AuditTrail auditTrail, AppleClientProvider clientFactory) {
         this.tokenMapper = tokenMapper;
         this.applicationMapper = applicationMapper;
-        this.operationLogMapper = operationLogMapper;
+        this.auditTrail = auditTrail;
         this.clientFactory = clientFactory;
     }
 
@@ -155,14 +155,9 @@ public class TokenDestroyService {
     /** 留痕只记单号与数量，不带 PPID，也不带认证实体编号 */
     private void writeDestroyLog(long tenantId, long userId, ApplicationPO application,
                                  int destroyed, boolean interrupted) {
-        OperationLogPO entry = new OperationLogPO();
-        entry.setTenantId(tenantId);
-        entry.setApplicationId(application.getId());
-        entry.setAction(OperationAction.DESTROY.name());
-        entry.setOperatorUserId(userId);
-        entry.setQuantity(destroyed);
-        entry.setDetail("销毁未使用实体 " + destroyed + " 个" + (interrupted ? "，有一批被拒绝后中止" : ""));
-        operationLogMapper.insert(entry);
+        auditTrail.append(AuditFact.of(tenantId, application.getId(), null, OperationAction.DESTROY,
+                userId, null, destroyed,
+                "销毁未使用实体 " + destroyed + " 个" + (interrupted ? "，有一批被拒绝后中止" : "")));
     }
 
     private ApplicationPO requireApplication(long tenantId, String applicationNo) {

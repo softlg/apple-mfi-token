@@ -2,7 +2,7 @@ package com.galaplat.mfi.issuance.application.pipeline.handler;
 
 import com.galaplat.mfi.apple.MfiTokenClient;
 import com.galaplat.mfi.apple.model.FileNameListResponse;
-import com.galaplat.mfi.credential.infrastructure.client.MfiClientFactory;
+import com.galaplat.mfi.credential.domain.AppleClientProvider;
 import com.galaplat.mfi.issuance.domain.Stage;
 import com.galaplat.mfi.shared.api.BizException;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationPO;
@@ -46,7 +46,7 @@ class FileNameStageHandlerTest {
     private static final String REQUEST_ID = "req-20261010";
 
     @Mock
-    private MfiClientFactory clientFactory;
+    private AppleClientProvider clientFactory;
     @Mock
     private MfiTokenClient client;
     @Mock

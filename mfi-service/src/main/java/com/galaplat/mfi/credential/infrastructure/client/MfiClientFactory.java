@@ -2,16 +2,15 @@ package com.galaplat.mfi.credential.infrastructure.client;
 
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.LoadingCache;
-import com.galaplat.mfi.apple.MfiEndpoints;
 import com.galaplat.mfi.apple.MfiSslContextBuilder;
 import com.galaplat.mfi.apple.MfiTokenClient;
 import com.galaplat.mfi.shared.api.ErrorCode;
 import com.galaplat.mfi.shared.api.BizException;
 import com.galaplat.mfi.apple.config.AppleProperties;
+import com.galaplat.mfi.credential.domain.AppleClientProvider;
 import com.galaplat.mfi.credential.domain.CredentialMaterial;
+import com.galaplat.mfi.credential.domain.TenantEndpointSource;
 import com.galaplat.mfi.credential.application.CredentialService;
-import com.galaplat.mfi.identity.infrastructure.persistence.TenantPO;
-import com.galaplat.mfi.identity.infrastructure.persistence.TenantMapper;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -22,7 +21,7 @@ import java.time.Duration;
 import java.util.concurrent.CompletionException;
 
 /**
- * 按租户装配并复用 {@link MfiTokenClient}。
+ * 按租户装配并复用 {@link MfiTokenClient}，是 {@link AppleClientProvider} 的唯一实现。
  *
  * <p>缓存的是"已握过手的证书上下文 + 连接池"，复用能省下每次调用的 TLS 开销。租户 2000 条 token
  * 文件动辄几十兆，连接复用不是可选项。
@@ -30,17 +29,21 @@ import java.util.concurrent.CompletionException;
  * <p>三条失效路径：凭证替换/删除由 Controller 显式 {@code evict}；租户改 BaseURL 时由租户服务
  * {@code evict}；30 分钟无访问被 TTL 清掉。TTL 同时是对明文私钥驻留内存时长的上限，
  * 这是这里保留过期时间而不只做容量上限的原因。
+ *
+ * <p>依赖方向：凭证材料来自本上下文的 {@link CredentialService}，出口地址来自本上下文声明的
+ * {@link TenantEndpointSource}（实现由身份上下文注入）。这里不再直连租户表，凭证上下文因此
+ * 不依赖任何其他上下文的持久层。
  */
 @Slf4j
 @Component
-public class MfiClientFactory {
+public class MfiClientFactory implements AppleClientProvider {
 
     /** 同时在用的租户数量级远小于此，上限只为兜住异常增长 */
     private static final int MAX_CACHED_TENANTS = 512;
 
     private final LoadingCache<Long, MfiTokenClient> cache;
     private final CredentialService credentialService;
-    private final TenantMapper tenantMapper;
+    private final TenantEndpointSource tenantEndpoints;
     private final AppleProperties appleProperties;
 
     /**
@@ -49,10 +52,10 @@ public class MfiClientFactory {
      */
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    public MfiClientFactory(CredentialService credentialService, TenantMapper tenantMapper,
+    public MfiClientFactory(CredentialService credentialService, TenantEndpointSource tenantEndpoints,
                             AppleProperties appleProperties) {
         this.credentialService = credentialService;
-        this.tenantMapper = tenantMapper;
+        this.tenantEndpoints = tenantEndpoints;
         this.appleProperties = appleProperties;
         this.cache = Caffeine.newBuilder()
                 .maximumSize(MAX_CACHED_TENANTS)
@@ -63,6 +66,7 @@ public class MfiClientFactory {
     /**
      * 取该租户的客户端，必要时现装。装不出来一律抛业务异常，绝不返回 null 让调用方带病继续。
      */
+    @Override
     public MfiTokenClient forTenant(long tenantId) {
         try {
             return cache.get(tenantId);
@@ -72,6 +76,7 @@ public class MfiClientFactory {
     }
 
     /** 凭证或 BaseURL 变更后必须调用，否则旧客户端会带着过期材料继续复用 */
+    @Override
     public void evict(long tenantId) {
         cache.invalidate(tenantId);
     }
@@ -99,18 +104,15 @@ public class MfiClientFactory {
     }
 
     /**
-     * 租户显式配了 BaseURL 就用它（本地 mTLS 桩、自建代理），否则按 technology 走官方域名分流。
+     * 出口地址由身份上下文给出：租户显式配了 BaseURL 就用它（本地 mTLS 桩、自建代理），
+     * 否则按 technology 走官方域名分流。租户不存在时不给装配机会，直接拒。
      */
     private String resolveBaseUrl(long tenantId) {
-        TenantPO tenant = tenantMapper.selectById(tenantId);
-        if (tenant == null) {
+        String baseUrl = tenantEndpoints.baseUrl(tenantId);
+        if (baseUrl == null) {
             throw new BizException(ErrorCode.TENANT_UNAVAILABLE, "租户不存在或已删除");
         }
-        String configured = tenant.getAppleBaseUrl();
-        if (configured != null && !configured.isBlank()) {
-            return configured.trim();
-        }
-        return MfiEndpoints.baseUrlFor(tenant.getAppleTechnology());
+        return baseUrl;
     }
 
     private static RuntimeException unwrap(CompletionException e) {

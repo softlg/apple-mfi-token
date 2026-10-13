@@ -4,7 +4,7 @@ import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import com.galaplat.mfi.apple.MfiEndpoints;
-import com.galaplat.mfi.credential.infrastructure.client.MfiClientFactory;
+import com.galaplat.mfi.credential.domain.AppleClientProvider;
 import com.galaplat.mfi.identity.infrastructure.persistence.TenantPO;
 import com.galaplat.mfi.identity.infrastructure.persistence.TenantMapper;
 import com.galaplat.mfi.identity.interfaces.TenantProfileRequest;
@@ -37,7 +37,7 @@ class TenantProfileServiceTest {
     private TenantMapper tenantMapper;
 
     @Mock
-    private MfiClientFactory clientFactory;
+    private AppleClientProvider clientFactory;
 
     private TenantProfileService service;
 

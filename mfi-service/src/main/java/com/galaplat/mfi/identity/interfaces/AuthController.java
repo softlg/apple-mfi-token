@@ -1,7 +1,6 @@
 package com.galaplat.mfi.identity.interfaces;
 
 import com.galaplat.mfi.identity.interfaces.LoginRequest;
-import com.galaplat.mfi.issuance.interfaces.RegisterRequest;
 import com.galaplat.mfi.identity.interfaces.SwitchTenantRequest;
 import com.galaplat.mfi.identity.interfaces.LoginVo;
 import com.galaplat.mfi.identity.interfaces.ProfileVo;

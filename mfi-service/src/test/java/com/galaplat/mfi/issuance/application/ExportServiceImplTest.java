@@ -8,11 +8,12 @@ import com.galaplat.mfi.shared.api.BizException;
 import com.galaplat.mfi.issuance.config.ExportProperties;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationPO;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ExportTaskPO;
-import com.galaplat.mfi.identity.infrastructure.persistence.OperationLogPO;
+import com.galaplat.mfi.identity.domain.AuditFact;
+import com.galaplat.mfi.identity.domain.OperationAction;
 import com.galaplat.mfi.issuance.infrastructure.persistence.TokenPO;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationMapper;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ExportTaskMapper;
-import com.galaplat.mfi.identity.infrastructure.persistence.OperationLogMapper;
+import com.galaplat.mfi.identity.application.AuditTrail;
 import com.galaplat.mfi.issuance.infrastructure.persistence.TokenMapper;
 import com.galaplat.mfi.shared.tenant.TenantContext;
 import com.galaplat.mfi.shared.tenant.TenantPrincipal;
@@ -78,7 +79,7 @@ class ExportServiceImplTest {
     @Mock
     private ApplicationMapper applicationMapper;
     @Mock
-    private OperationLogMapper operationLogMapper;
+    private AuditTrail auditTrail;
 
     private ExportProperties properties;
     private ExportServiceImpl service;
@@ -93,7 +94,7 @@ class ExportServiceImplTest {
         properties.setPageSize(2);
         properties.setMaxRows(1000);
         // 同步执行器：create() 里提交的任务会立刻在这条线程上跑完，断言不用等异步
-        service = new ExportServiceImpl(exportTaskMapper, tokenMapper, applicationMapper, operationLogMapper,
+        service = new ExportServiceImpl(exportTaskMapper, tokenMapper, applicationMapper, auditTrail,
                 properties, new ObjectMapper(), Runnable::run);
 
         when(exportTaskMapper.insert(any(ExportTaskPO.class))).thenAnswer(invocation -> {
@@ -183,13 +184,13 @@ class ExportServiceImplTest {
         assertTrue(lines.get(3).contains("SN-C"), lines.get(3));
         assertTrue(lines.get(1).contains("2026-10-12 10:30:00"), lines.get(1));
 
-        ArgumentCaptor<OperationLogPO> logs = ArgumentCaptor.forClass(OperationLogPO.class);
-        verify(operationLogMapper).insert(logs.capture());
-        assertEquals("EXPORT", logs.getValue().getAction());
-        assertEquals(3, logs.getValue().getQuantity().intValue());
+        ArgumentCaptor<AuditFact> logs = ArgumentCaptor.forClass(AuditFact.class);
+        verify(auditTrail).append(logs.capture());
+        assertEquals(OperationAction.EXPORT, logs.getValue().action());
+        assertEquals(3, logs.getValue().quantity().intValue());
         // 留痕里绝不出现 token 原文与密钥
-        assertFalse(logs.getValue().getDetail().contains("TOKEN-"), logs.getValue().getDetail());
-        assertFalse(logs.getValue().getDetail().contains("CRC-"), logs.getValue().getDetail());
+        assertFalse(logs.getValue().detail().contains("TOKEN-"), logs.getValue().detail());
+        assertFalse(logs.getValue().detail().contains("CRC-"), logs.getValue().detail());
     }
 
     @Test
@@ -217,7 +218,7 @@ class ExportServiceImplTest {
         service.run(TENANT_ID, TASK_ID, USER_ID);
 
         assertFalse(Files.exists(exportDir.resolve(TASK_NO + ".csv")));
-        verify(operationLogMapper, never()).insert(any(OperationLogPO.class));
+        verify(auditTrail, never()).append(any(AuditFact.class));
     }
 
     @Test
@@ -233,7 +234,7 @@ class ExportServiceImplTest {
         verify(exportTaskMapper).markFailed(eq(TENANT_ID), eq(TASK_ID), reason.capture());
         assertTrue(reason.getValue().contains("read boom"), reason.getValue());
         verify(exportTaskMapper, never()).markSuccess(anyLong(), anyLong(), any(), anyInt());
-        verify(operationLogMapper, never()).insert(any(OperationLogPO.class));
+        verify(auditTrail, never()).append(any(AuditFact.class));
         // 半途文件不留在磁盘上：任务已经 FAILED，那份只有凭证材料、没人能下载
         assertFalse(Files.exists(exportDir.resolve(TASK_NO + ".csv")));
     }

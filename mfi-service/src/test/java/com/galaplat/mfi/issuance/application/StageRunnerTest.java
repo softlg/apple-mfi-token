@@ -7,10 +7,10 @@ import com.galaplat.mfi.shared.api.BizException;
 import com.galaplat.mfi.issuance.config.PipelineProperties;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationPO;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationPpidPO;
-import com.galaplat.mfi.identity.infrastructure.persistence.OperationLogPO;
+import com.galaplat.mfi.identity.domain.AuditFact;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationMapper;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationPpidMapper;
-import com.galaplat.mfi.identity.infrastructure.persistence.OperationLogMapper;
+import com.galaplat.mfi.identity.application.AuditTrail;
 import com.galaplat.mfi.issuance.infrastructure.mq.ShardMessageProducer;
 import com.galaplat.mfi.issuance.infrastructure.mq.StageMessage;
 import com.galaplat.mfi.identity.application.TenantConfigService;
@@ -63,7 +63,7 @@ class StageRunnerTest {
     @Mock
     private ApplicationMapper applicationMapper;
     @Mock
-    private OperationLogMapper operationLogMapper;
+    private AuditTrail auditTrail;
     @Mock
     private TenantConfigService configService;
     @Mock
@@ -85,7 +85,7 @@ class StageRunnerTest {
         properties.setGateRetryMillis(30_000L);
 
         handler = new StubHandler(Stage.APPLY);
-        runner = new StageRunner(List.of(handler), shardMapper, applicationMapper, operationLogMapper,
+        runner = new StageRunner(List.of(handler), shardMapper, applicationMapper, auditTrail,
                 configService, gate, producer, aggregator, properties);
 
         shard = newShard();
@@ -155,7 +155,7 @@ class StageRunnerTest {
         runner.run(message(Stage.APPLY));
 
         verify(producer, never()).publishStage(any());
-        verify(operationLogMapper, never()).insert(any(OperationLogPO.class));
+        verify(auditTrail, never()).append(any(AuditFact.class));
     }
 
     @Test
@@ -172,7 +172,7 @@ class StageRunnerTest {
                 eq("SUCCESS"), isNull(), any(LocalDateTime.class));
         verify(aggregator).aggregate(TENANT_ID, APPLICATION_ID);
         verify(producer, never()).publishStage(any());
-        assertEquals(OperationAction.STAGE_ADVANCE.name(), firstLog().getAction());
+        assertEquals(OperationAction.STAGE_ADVANCE, firstLog().action());
     }
 
     @Test
@@ -187,7 +187,7 @@ class StageRunnerTest {
         verify(aggregator).aggregate(TENANT_ID, APPLICATION_ID);
         // 永久失败不该再排重试
         verify(shardMapper, never()).schedule(anyLong(), anyLong(), anyString(), anyInt(), any(), any());
-        assertEquals(OperationAction.RETRY.name(), firstLog().getAction());
+        assertEquals(OperationAction.RETRY, firstLog().action());
     }
 
     @Test
@@ -209,7 +209,7 @@ class StageRunnerTest {
         verify(producer).publishDelayed(any(StageMessage.class), delay.capture());
         assertTrue(delay.getValue() > 50_000L && delay.getValue() <= 60_000L, "实际延迟=" + delay.getValue());
         verify(producer, never()).publishDead(any(), any());
-        assertEquals(OperationAction.RETRY.name(), firstLog().getAction());
+        assertEquals(OperationAction.RETRY, firstLog().action());
         verify(shardMapper, never()).markDead(anyLong(), anyLong(), anyString(), any());
     }
 
@@ -235,7 +235,7 @@ class StageRunnerTest {
                 retryCount.capture(), any(LocalDateTime.class), eq("苹果尚未生成文件"));
         // 等待不是失败：大文件等几个小时绝不该把分片耗进死信队列
         assertEquals(0, retryCount.getValue());
-        verify(operationLogMapper, never()).insert(any(OperationLogPO.class));
+        verify(auditTrail, never()).append(any(AuditFact.class));
     }
 
     @Test
@@ -307,13 +307,13 @@ class StageRunnerTest {
     }
 
     private StageRunner runnerWith(StageHandler... stageHandlers) {
-        return new StageRunner(List.of(stageHandlers), shardMapper, applicationMapper, operationLogMapper,
+        return new StageRunner(List.of(stageHandlers), shardMapper, applicationMapper, auditTrail,
                 configService, gate, producer, aggregator, properties);
     }
 
-    private OperationLogPO firstLog() {
-        ArgumentCaptor<OperationLogPO> captor = ArgumentCaptor.forClass(OperationLogPO.class);
-        verify(operationLogMapper).insert(captor.capture());
+    private AuditFact firstLog() {
+        ArgumentCaptor<AuditFact> captor = ArgumentCaptor.forClass(AuditFact.class);
+        verify(auditTrail).append(captor.capture());
         return captor.getValue();
     }
 

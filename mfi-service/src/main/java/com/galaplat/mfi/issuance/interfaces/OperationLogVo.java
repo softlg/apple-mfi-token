@@ -1,4 +1,4 @@
-package com.galaplat.mfi.identity.interfaces;
+package com.galaplat.mfi.issuance.interfaces;
 
 import lombok.Data;
 

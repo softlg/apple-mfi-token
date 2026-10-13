@@ -10,7 +10,7 @@ import org.springframework.stereotype.Service;
 import java.io.IOException;
 import java.util.UUID;
 import com.galaplat.mfi.apple.model.MfiResponse;
-import com.galaplat.mfi.credential.infrastructure.client.MfiClientFactory;
+import com.galaplat.mfi.credential.domain.AppleClientProvider;
 
 /**
  * 凭证连通性自检：用一次真实的双向握手证明证书被对端接受。
@@ -25,10 +25,10 @@ import com.galaplat.mfi.credential.infrastructure.client.MfiClientFactory;
 @Service
 public class MfiProbeService {
 
-    private final MfiClientFactory clientFactory;
+    private final AppleClientProvider clientFactory;
     private final CredentialService credentialService;
 
-    public MfiProbeService(MfiClientFactory clientFactory, CredentialService credentialService) {
+    public MfiProbeService(AppleClientProvider clientFactory, CredentialService credentialService) {
         this.clientFactory = clientFactory;
         this.credentialService = credentialService;
     }

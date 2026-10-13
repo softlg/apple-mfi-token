@@ -1,5 +1,6 @@
 package com.galaplat.mfi.issuance.application;
 
+import com.galaplat.mfi.identity.domain.AuditFact;
 import com.galaplat.mfi.identity.domain.OperationAction;
 import com.galaplat.mfi.issuance.domain.Stage;
 import com.galaplat.mfi.issuance.domain.StageStatus;
@@ -8,14 +9,13 @@ import com.galaplat.mfi.shared.api.BizException;
 import com.galaplat.mfi.issuance.config.PipelineProperties;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationPO;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationPpidPO;
-import com.galaplat.mfi.identity.infrastructure.persistence.OperationLogPO;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationMapper;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationPpidMapper;
-import com.galaplat.mfi.identity.infrastructure.persistence.OperationLogMapper;
 import com.galaplat.mfi.shared.tenant.TenantContext;
 import com.galaplat.mfi.shared.tenant.TenantPrincipal;
 import com.galaplat.mfi.issuance.infrastructure.mq.ShardMessageProducer;
 import com.galaplat.mfi.issuance.infrastructure.mq.StageMessage;
+import com.galaplat.mfi.identity.application.AuditTrail;
 import com.galaplat.mfi.identity.application.TenantConfigService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -57,7 +57,7 @@ public class StageRunner {
     private final Map<Stage, StageHandler> handlers = new EnumMap<>(Stage.class);
     private final ApplicationPpidMapper shardMapper;
     private final ApplicationMapper applicationMapper;
-    private final OperationLogMapper operationLogMapper;
+    private final AuditTrail auditTrail;
     private final TenantConfigService configService;
     private final TenantConcurrencyGate gate;
     private final ShardMessageProducer producer;
@@ -65,14 +65,14 @@ public class StageRunner {
     private final PipelineProperties properties;
 
     public StageRunner(List<StageHandler> stageHandlers, ApplicationPpidMapper shardMapper,
-                       ApplicationMapper applicationMapper, OperationLogMapper operationLogMapper,
+                       ApplicationMapper applicationMapper, AuditTrail auditTrail,
                        TenantConfigService configService, TenantConcurrencyGate gate,
                        ShardMessageProducer producer, ApplicationAggregator aggregator,
                        PipelineProperties properties) {
         stageHandlers.forEach(handler -> handlers.put(handler.stage(), handler));
         this.shardMapper = shardMapper;
         this.applicationMapper = applicationMapper;
-        this.operationLogMapper = operationLogMapper;
+        this.auditTrail = auditTrail;
         this.configService = configService;
         this.gate = gate;
         this.producer = producer;
@@ -254,37 +254,24 @@ public class StageRunner {
         return tiers.get(index) * 1_000_000L;
     }
 
+    /** 阶段留痕一律记成系统动作（operator 为空），与人工操作在时间线上天然区分开 */
     private void writeStageLog(StageContext context, Stage next) {
-        OperationLogPO entry = baseLog(context, OperationAction.STAGE_ADVANCE);
-        entry.setQuantity(context.shard().getAllocateCount());
-        entry.setDetail(next == null
-                ? "阶段 " + context.stage() + " 完成，分片结束"
-                : "阶段 " + context.stage() + " 完成，进入 " + next);
-        operationLogMapper.insert(entry);
+        auditTrail.append(AuditFact.system(context.tenantId(), context.application().getId(), context.shardId(),
+                OperationAction.STAGE_ADVANCE, context.shard().getAllocateCount(),
+                next == null ? "阶段 " + context.stage() + " 完成，分片结束"
+                        : "阶段 " + context.stage() + " 完成，进入 " + next));
     }
 
     private void writeRetryLog(StageContext context, int retryCount, String reason) {
-        OperationLogPO entry = baseLog(context, OperationAction.RETRY);
-        entry.setQuantity(retryCount);
-        entry.setDetail("阶段 " + context.stage() + " 第 " + retryCount + " 次重试：" + summarize(reason));
-        operationLogMapper.insert(entry);
+        auditTrail.append(AuditFact.system(context.tenantId(), context.application().getId(), context.shardId(),
+                OperationAction.RETRY, retryCount,
+                "阶段 " + context.stage() + " 第 " + retryCount + " 次重试：" + summarize(reason)));
     }
 
     private void writeDeadLog(StageContext context, String reason) {
-        OperationLogPO entry = baseLog(context, OperationAction.RETRY);
-        entry.setQuantity(nullToZero(context.shard().getRetryCount()));
-        entry.setDetail("阶段 " + context.stage() + " 终态失败：" + summarize(reason));
-        operationLogMapper.insert(entry);
-    }
-
-    /** 系统动作：operator 留空，与人工操作在 t_operation_log 里天然区分开 */
-    private OperationLogPO baseLog(StageContext context, OperationAction action) {
-        OperationLogPO entry = new OperationLogPO();
-        entry.setTenantId(context.tenantId());
-        entry.setApplicationId(context.application().getId());
-        entry.setShardId(context.shardId());
-        entry.setAction(action.name());
-        return entry;
+        auditTrail.append(AuditFact.system(context.tenantId(), context.application().getId(), context.shardId(),
+                OperationAction.RETRY, nullToZero(context.shard().getRetryCount()),
+                "阶段 " + context.stage() + " 终态失败：" + summarize(reason)));
     }
 
     private static int nullToZero(Integer value) {
