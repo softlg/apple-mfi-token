@@ -12,16 +12,47 @@
 
     <artifactId>mfi-service</artifactId>
     <name>mfi-service</name>
-    <description>Spring Boot application: REST API, tenant context, credentials, MQ pipeline, Excel.</description>
+    <description>The single deployable application. Bounded contexts live as packages, not as Maven modules.</description>
 
     <dependencies>
+        <!--
+          持久层。MyBatis-Plus 3.5.9 起把依赖 JSqlParser 的 inner 拦截器拆成可选模块，
+          租户隔离与分页都靠这两个类，缺失会编译期找不到符号。
+        -->
         <dependency>
-            <groupId>com.galaplat.mfi</groupId>
-            <artifactId>mfi-apple</artifactId>
+            <groupId>com.baomidou</groupId>
+            <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
         </dependency>
         <dependency>
-            <groupId>com.galaplat.mfi</groupId>
-            <artifactId>mfi-dao</artifactId>
+            <groupId>com.baomidou</groupId>
+            <artifactId>mybatis-plus-jsqlparser</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.mysql</groupId>
+            <artifactId>mysql-connector-j</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-mysql</artifactId>
+        </dependency>
+
+        <!-- 苹果 MFI 客户端：每租户一套证书的 mTLS，PEM/PKCS#1 分派在 bcpkix -->
+        <dependency>
+            <groupId>com.squareup.okhttp3</groupId>
+            <artifactId>okhttp</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcpkix-jdk18on</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
         </dependency>
 
         <dependency>

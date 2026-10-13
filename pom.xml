@@ -19,9 +19,8 @@
     <name>apple-mfi-token</name>
     <description>Multi-tenant SaaS for Apple MFI software token provisioning</description>
 
+    <!-- 单一 Maven 模块：限界上下文靠包与 ArchUnit 约束，不再靠多模块切分 -->
     <modules>
-        <module>mfi-apple</module>
-        <module>mfi-dao</module>
         <module>mfi-service</module>
     </modules>
 
@@ -31,7 +30,6 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
 
-        <revision.module>1.0.0-SNAPSHOT</revision.module>
         <mybatis-plus.version>3.5.9</mybatis-plus.version>
         <sa-token.version>1.44.0</sa-token.version>
         <okhttp.version>4.12.0</okhttp.version>
@@ -44,17 +42,6 @@
 
     <dependencyManagement>
         <dependencies>
-            <dependency>
-                <groupId>com.galaplat.mfi</groupId>
-                <artifactId>mfi-apple</artifactId>
-                <version>${revision.module}</version>
-            </dependency>
-            <dependency>
-                <groupId>com.galaplat.mfi</groupId>
-                <artifactId>mfi-dao</artifactId>
-                <version>${revision.module}</version>
-            </dependency>
-
             <dependency>
                 <groupId>com.baomidou</groupId>
                 <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
