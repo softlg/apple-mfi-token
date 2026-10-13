@@ -27,4 +27,4 @@ spring:
 # 因此只允许存在于本地的 application-local.yml，绝不能出现在部署配置里。
 #logging:
 #  level:
-#    com.galaplat.mfi.dao.mapper: DEBUG
+#    com.galaplat.mfi.issuance.infrastructure.persistence: DEBUG

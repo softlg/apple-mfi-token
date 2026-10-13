@@ -1,7 +1,7 @@
 package com.galaplat.mfi.apple;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.galaplat.mfi.apple.response.MfiResponse;
+import com.galaplat.mfi.apple.model.MfiResponse;
 import com.sun.net.httpserver.HttpsConfigurator;
 import com.sun.net.httpserver.HttpsExchange;
 import com.sun.net.httpserver.HttpsParameters;

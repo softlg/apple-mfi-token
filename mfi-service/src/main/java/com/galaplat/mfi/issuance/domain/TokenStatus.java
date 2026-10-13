@@ -1,0 +1,28 @@
+package com.galaplat.mfi.issuance.domain;
+import com.galaplat.mfi.issuance.infrastructure.persistence.TokenMapper;
+
+/**
+ * Token 生命周期状态。
+ */
+public enum TokenStatus {
+
+    /** 苹果已下发、本系统已落库 */
+    ISSUED,
+    /** 已作为 used auth entity 注册回苹果 */
+    REGISTERED,
+    /** 本系统标记报废，苹果侧状态不一定同步 */
+    SCRAPPED,
+    /** 已调用苹果 destroyUnusedAuthEntities 销毁，不可逆 */
+    DESTROYED;
+
+    /**
+     * 仅未使用的实体可被苹果销毁。
+     *
+     * <p>SCRAPPED 不在其列：那只是本系统自己打的报废标记，苹果侧到底还绑没绑配件无从确认，
+     * 所以对苹果发起销毁只对 ISSUED 的行（见 {@code TokenMapper#selectDestroyCandidates}）。
+     */
+    public boolean destroyable() {
+        return this == ISSUED;
+    }
+
+}

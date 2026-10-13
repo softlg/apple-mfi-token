@@ -142,6 +142,10 @@ logging:
   level:
     root: INFO
     com.galaplat.mfi: DEBUG
-    # mapper 必须停在 INFO：DEBUG 会把 SQL 与占位符实参整条打进日志，
+    # mapper 必须逐个上下文钉在 INFO：DEBUG 会把 SQL 与占位符实参整条打进日志，
     # 里面就是 PPID、凭证密文这类租户数据。本地要查 SQL 只在 application-local.yml 里开。
-    com.galaplat.mfi.dao.mapper: INFO
+    # mapper 接口按上下文放在各自的 infrastructure.persistence 包里，新增上下文要同步加一行。
+    com.galaplat.mfi.identity.infrastructure.persistence: INFO
+    com.galaplat.mfi.credential.infrastructure.persistence: INFO
+    com.galaplat.mfi.ppid.infrastructure.persistence: INFO
+    com.galaplat.mfi.issuance.infrastructure.persistence: INFO
