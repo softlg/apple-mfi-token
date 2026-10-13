@@ -68,8 +68,8 @@ P8a 验收里专门把 broker 杀掉再起来验证过这一点。
 
 ```bash
 # 后端（仓库根）
-mvn -q -DskipTests install          # 多模块：先 install，-pl 单模块构建才会拿到兄弟模块的新 jar
-mvn test
+mvn -q -DskipTests install          # 单模块（mfi-service）：仓库根构建即产出可执行 jar
+mvn test                            # 含 ArchitectureTest，跨上下文引用内部实现会在这里失败
 
 # 前端（web/）
 pnpm install
@@ -126,7 +126,8 @@ mfi.export.dir / page-size / max-rows / worker-size / queue-capacity / stale-tim
 租户级业务参数在 `t_tenant_config` 里按租户覆盖（`APPLY_MAX_QUANTITY`、`APPLE_REGISTER_BATCH_SIZE`、
 `PIPELINE_MAX_RETRY`、`PIPELINE_CONCURRENT_PER_TENANT`、`SERIAL_NUMBER_PREFIX`），不要在代码里写死。
 
-日志：`com.galaplat.mfi.dao.mapper` 必须停在 **INFO**。DEBUG 会把 SQL 与占位符实参整条打进去，里面是 PPID
+日志：mapper 接口按上下文各自待在 `com.galaplat.mfi.<context>.infrastructure.persistence` 包里，`application.yml`
+把它们逐个钉在 **INFO**（新增上下文要同步补一行）。DEBUG 会把 SQL 与占位符实参整条打进去，里面是 PPID
 与凭证密文。本地临时排查只在 `application-local.yml` 里开。
 
 告警抓手（都是 ERROR，可直接被抓取）：
@@ -158,6 +159,17 @@ PYTHONIOENCODING=utf-8 python -u scripts/verify-p8.py
 
 脚本自己注册租户、上传各自证书、并发下单、杀 broker 再拉起、跑跨租户渗透与日志红线 grep。
 它只在 stdout 打计数与断言名，不打印任何凭证或 token 材料。
+
+库名与 vhost 由 `MFI_DB_NAME`（默认 `apple_mfi_token`）和 `MFI_RABBITMQ_VHOST`（默认 `/`）下发给
+脚本，与应用的 `MFI_DB_URL` / `MFI_RABBITMQ_VHOST` 成对设置即可把验收挪到一套全新的 schema 与 vhost 上。
+需要这么做是因为队列拓扑与积压类断言按名字计数：共享 broker 上留着旧 `mfi.pipeline.delay-tiers`
+（改档位会让延迟队列改名）声明出来的 `mfi.delay.*`，开发租户的在途分片也会被兜底扫描重新排期，
+账目就不是确定的。新建库靠 `createDatabaseIfNotExist=true`，新建 vhost 靠 `rabbitmqctl add_vhost`，
+两者都不动既有数据。
+
+架构约束由 `mfi-service/src/test/java/com/galaplat/mfi/architecture/ArchitectureTest.java` 在 `mvn test`
+里守住：限界上下文之间只能靠消费方定义的端口往来，任一上下文直接引用另一个上下文的
+`infrastructure`/`interfaces` 都会让构建失败。
 
 ## 9. 已知未验证项
 

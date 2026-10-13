@@ -25,7 +25,9 @@ import urllib.request
 
 BASE = os.environ.get("MFI_BASE", "http://localhost:8090")
 MYSQL = os.environ.get("MFI_MYSQL", r"C:\Program Files\MySQL\MySQL Server 8.0\bin\mysql.exe")
+DB = os.environ.get("MFI_DB_NAME", "apple_mfi_token")
 RABBITMQCTL = os.environ.get("MFI_RABBITMQCTL", r"D:\tools\rabbitmq_server-3.13.7\sbin\rabbitmqctl.bat")
+VHOST = os.environ.get("MFI_RABBITMQ_VHOST", "/")
 results = []
 skips = []
 
@@ -70,7 +72,7 @@ def mysql_value(sql):
     handle.close()
     try:
         proc = subprocess.run([MYSQL, "--defaults-extra-file=" + handle.name, "-N", "-B", "-e", sql,
-                               "apple_mfi_token"], capture_output=True, timeout=60)
+                               DB], capture_output=True, timeout=60)
         out = proc.stdout.decode("utf-8", "replace").strip()
         if proc.returncode != 0:
             print("  mysql 调用失败: " + proc.stderr.decode("utf-8", "replace")[:200])
@@ -91,7 +93,7 @@ def queue_depth():
     env["PATH"] = env.get("PATH", "") + os.pathsep + os.path.join(erlang, "bin") \
         + os.pathsep + os.path.join(erlang, "erts-14.2.5.4", "bin")
     try:
-        proc = subprocess.run([RABBITMQCTL, "list_queues", "name", "messages", "--quiet"],
+        proc = subprocess.run([RABBITMQCTL, "-p", VHOST, "list_queues", "name", "messages", "--quiet"],
                               capture_output=True, timeout=90, env=env)
     except Exception as error:
         print("  rabbitmqctl 调用异常: " + str(error)[:200])
@@ -105,6 +107,25 @@ def queue_depth():
         if parts and parts[0] == "mfi.apply.queue":
             return int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
     return 0
+
+
+def consumed_evidence(tenant_id):
+    """这两个分片有没有被取走过：申请单离开受理态，或分片拿到了苹果的 request id"""
+    value = mysql_value("select concat(sum(a.status <> 'PENDING'), ',', sum(p.apple_request_uuid is not null)) "
+                        "from t_application_ppid p join t_application a on a.id = p.application_id "
+                        "where p.tenant_id=%s and p.stage_status <> 'DEAD'" % tenant_id)
+    return value if value and value != "0,0" else None
+
+
+def wait_for(supplier, timeout):
+    """活体断言用的轮询：消费者在线时队列里的消息什么时候被取走不可控，只能等"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        value = supplier()
+        if value:
+            return value
+        time.sleep(3)
+    return None
 
 
 def new_tenant(account, name, password):
@@ -204,9 +225,17 @@ def main():
     check("库里分片 2 行、合计 120", len(parts) > 1 and parts[0] == "2" and parts[1] == "120", shard_db)
     app_row = mysql_value("select concat(status,'|',apply_quantity,'|',ppid_count,'|',apple_technology) "
                           "from t_application where tenant_id=%s" % tenant_id)
-    check("申请单快照完整（状态/量/分片数/technology）", (app_row or "").startswith("PENDING|120|2|"), app_row)
+    app_parts = (app_row or "").split("|")
+    # 流水线消费者一在线就可能已经把 APPLY 接走，所以状态只按"合法状态集合"判；
+    # 这条断言要钉的是快照本身：申请量、分片数与 technology 有没有原样落库
+    app_status = app_parts[0] if len(app_parts) == 4 else "PENDING"
+    check("申请单快照完整（状态/量/分片数/technology）",
+          len(app_parts) == 4 and app_parts[1] == "120" and app_parts[2] == "2"
+          and app_parts[0] in ("PENDING", "RUNNING", "SUCCESS", "PARTIAL_FAILED", "FAILED") and app_parts[3],
+          app_row)
+    # 按动作取，不看"最后一条"：消费者在线时流水线已经往这张表追加了阶段与重试留痕
     oplog = mysql_value("select concat(action,'|',ifnull(quantity,-1)) from t_operation_log "
-                        "where tenant_id=%s order by id desc limit 1" % tenant_id)
+                        "where tenant_id=%s and action='APPLY' order by id desc limit 1" % tenant_id)
     check("受理动作写了留痕且只记数量", oplog == "APPLY|120", oplog)
     leaked = mysql_value("select count(*) from t_operation_log where tenant_id=%s and detail like '%%P4-BIG-%%'"
                          % tenant_id)
@@ -217,8 +246,14 @@ def main():
     if depth_before is None or depth_after is None:
         skip("队列深度对账", "rabbitmqctl 不可用（%s）" % RABBITMQCTL)
     else:
-        check("受理 2 个分片，队列正好多出 2 条", depth_after - depth_before == 2,
-              "before=%s after=%s" % (depth_before, depth_after))
+        # mfi.apply.queue 里还躺着别的租户在飞的消息，队列计数只增不减才说明问题，
+        # 所以正好 +2 只在消费者空闲时成立。消费者在线时改用库里的证据：
+        # 这两片被取走过（申请单离开受理态，或分片拿到了苹果的 request id）
+        moved = None if depth_after - depth_before == 2 else wait_for(
+            lambda: consumed_evidence(tenant_id), 180)
+        check("受理 2 个分片：队列正好多出 2 条，或已被消费者取走",
+              depth_after - depth_before == 2 or moved is not None,
+              "before=%s after=%s 库里证据=%s" % (depth_before, depth_after, moved))
 
     print("\n[5] 幂等：同一个 requestId 只扣一份额度")
     idem_model = "P4-IDEM-" + stamp
@@ -298,8 +333,11 @@ def main():
     check("B 的失败尝试没有落任何单", b_rows == "0", "count=" + str(b_rows))
 
     print("\n[9] 列表筛选与接口可见性")
-    status, page_a = call("GET", "/api/applications/page?pageSize=50&status=PENDING&productModel=%s" % model,
-                          token=token)
+    # 重新读一次状态：本租户这张单在两次查询之间可能已经被流水线推进
+    live_status = (mysql_value("select status from t_application where tenant_id=%s "
+                               "and application_no='%s'" % (tenant_id, application_no)) or app_status).strip()
+    status, page_a = call("GET", "/api/applications/page?pageSize=50&status=%s&productModel=%s"
+                          % (live_status, model), token=token)
     data = page_a.get("data") or {}
     check("按状态与型号筛选命中刚受理的单", data.get("total") == 1 and
           (data.get("records") or [{}])[0].get("applicationNo") == application_no, data)

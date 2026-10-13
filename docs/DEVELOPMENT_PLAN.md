@@ -99,56 +99,43 @@
 
 ## 4. 工程结构
 
-收敛为 3 个 Java 模块 + 1 个前端目录（对齐 MES 的 `apple/dao/service` 分层，去掉空的 `-api` 模块和多余的 `-core/-pipeline` 拆分）：
+**当前形态（§15 的 R1–R4 之后）：单一 Maven 模块 + 限界上下文包**。P0 定下的是 3 个模块
+（`mfi-apple` / `mfi-dao` / `mfi-service`），R1 把它们合成一个可部署模块，R2 把包按上下文重排——
+边界改由包与 ArchUnit 表达，不再由模块表达：
 
 ```
 apple-mfi-token/
-├─ pom.xml                      父 POM，dependencyManagement 统一版本
+├─ pom.xml                      父 POM：dependencyManagement 统一版本，modules 只有 mfi-service
 ├─ AGENTS.md                    仓库执行守则
 ├─ docker-compose.yml           MySQL + Redis + RabbitMQ 本地底座
 ├─ .env.example                 必需环境变量清单（不含真实值）
-├─ docs/
-│  ├─ DEVELOPMENT_PLAN.md       本文件
-│  ├─ mfi-token-flow.md         苹果 API 语义与状态机说明
-│  └─ DEPLOYMENT.md             部署与运行说明
-├─ mfi-apple/                   苹果 MFI 客户端（多租户 mTLS）
-│  └─ src/main/java/com/galaplat/mfi/apple/
-│     ├─ MfiTokenClient.java        9 个苹果接口的封装
-│     ├─ MfiSslContextBuilder.java  cert/key → SSLContext（PKCS8/PKCS1 兼容）
-│     ├─ model/                     请求体
-│     ├─ response/                  响应体 + 错误码
-│     └─ util/                      DownloadAvailability 解析、BaseURL 路由
-├─ mfi-dao/                     持久层
+├─ docs/                        本文件、mfi-token-flow.md、DEPLOYMENT.md
+├─ scripts/                     自签证书生成、苹果侧 mTLS 桩、P2–P8 活体验收脚本
+├─ mfi-service/                 唯一的可执行模块
 │  └─ src/main/
-│     ├─ java/com/galaplat/mfi/dao/
-│     │  ├─ entity/             PO（@TableName）
-│     │  ├─ mapper/             Mapper 接口
-│     │  ├─ tenant/             TenantContext、TenantPrincipal、TenantNotBoundException
-│     │  └─ mybatis/            TenantLineHandler、插件装配
-│     └─ resources/db/migration/V*.sql
-└─ mfi-service/                 Spring Boot 应用（可执行）
-   └─ src/main/
-      ├─ java/com/galaplat/mfi/
-      │  ├─ MfiTokenApplication.java
-      │  ├─ controller/         auth / member / credential / ppid / application / token
-      │  ├─ service/            业务服务 + impl
-      │  ├─ client/             MfiClientFactory：按租户构造 + Caffeine 缓存
-      │  ├─ pipeline/           RabbitMQ 配置、5 阶段监听器、DLQ
-      │  ├─ security/           租户绑定拦截器、sa-token 装配、owner 校验
-      │  ├─ crypto/             凭证 AES-256-GCM 加解密
-      │  └─ excel/              PPID 导入模板、token 导出
+│     ├─ java/com/galaplat/mfi/
+│     │  ├─ MfiTokenApplication.java
+│     │  ├─ shared/             api（统一响应/异常/分页）、health、persistence（租户 SQL 改写与白名单）、tenant（上下文与 sa-token 装配）
+│     │  ├─ apple/              MfiTokenClient、MfiSslContextBuilder、model、config —— 不碰库不碰 Web 的防腐层
+│     │  ├─ credential/         凭证 AES-256-GCM 加解密、MfiClientFactory、租户苹果域名；对外只露 AppleClientProvider / TenantEndpointSource
+│     │  ├─ identity/           用户/租户/成员/租户配置/登录会话/审计留痕；对外只露 AuditTrail / AccountReader / TenantProfileReader
+│     │  ├─ ppid/               PPID 池、Excel 导入、分配与 CAS 扣减
+│     │  └─ issuance/           申请聚合、五阶段流水线（application/pipeline）、token 结果、进度、重放、导出、销毁
+│     └─ resources/
+│        ├─ application.yml     mapper 包按上下文逐个钉 INFO
+│        ├─ application-local.yml （gitignore）
+│        └─ db/migration/V*.sql  Flyway 全量托管 DDL
+└─ web/                         Vue 3 + Element Plus + Vite（pnpm），构建产物由 web-ui profile 拷进 static
 ```
 
-`[P0 调整]` 两处与初版结构的偏离，都由依赖方向决定：
+每个业务上下文内部固定四层：`domain`（状态机与不变式承载物、本上下文需要的端口）、
+`application`（用例编排）、`infrastructure`（`persistence` / `client` / `mq` / `excel` / `sn` 适配）、
+`interfaces`（controller、请求/VO、MQ 监听器）。
 
-- **`MfiClientFactory` 从 `mfi-apple` 移到 `mfi-service/client`**。工厂要读 `t_tenant_credential` 并解密，若放在 `mfi-apple` 就得让 `mfi-apple → mfi-dao/crypto`，客户端库被拖进数据库依赖。现在 `mfi-apple` 保持纯 Java + OkHttp，工厂在上层组装。
-- **`TenantContext` 放在 `mfi-dao/tenant` 而非 `mfi-service/security`**。租户拦截器在 DAO 层，它必须能读到上下文；若上下文在上层，`mfi-dao` 就反向依赖 `mfi-service`。放 DAO 层也让"上下文缺失即抛错"的守卫离执行点最近。
-      │  └─ common/             统一响应、异常、枚举、分页
-      └─ resources/
-         ├─ application.yml
-         ├─ application-local.yml   （gitignore）
-         └─ mapper/*.xml            仅复杂查询
-```
+两条由依赖方向决定的落位，P0 时成立、R2/R3 之后仍以同样理由成立：
+
+- **`MfiClientFactory` 不在 `apple` 而在 `credential/infrastructure/client`**。工厂要读 `t_tenant_credential` 并解密，放进 `apple` 就会把数据库依赖拖进客户端库；现在 `apple` 保持纯 Java + OkHttp，并由 ArchUnit 的 `appleStaysALeaf` 钉住它不许依赖任何业务上下文。
+- **`TenantContext` 在 `shared/tenant` 而不是业务上下文里**。租户拦截器与它必须同层可见，且它谁都不认识；放业务上下文里就会让 `shared` 反向依赖业务（同样有一条 `sharedKnowsNoBusinessContext` 守着）。
 
 ---
 
@@ -307,7 +294,8 @@ PPID 这一条按"单个也不落"执行，不做"只禁全量列表"的宽解�
 
 红线不只约束自己写的日志语句，也约束**日志级别配置**：`logging.level.<mapper 包>: DEBUG` 会让 MyBatis 把每条 SQL 连同占位符实参整行输出，
 PPID、凭证密文、其他租户的数据都会随之落盘，而这类泄露不会出现在 code review 的 diff 里。P3 就踩过一次（§11 的 P3 偏差第 7 条），
-现在入库的 `application.yml` 固定 `com.galaplat.mfi.dao.mapper: INFO`，SQL 调试只能在 gitignored 的 `application-local.yml` 里临时取消注释。
+现在入库的 `application.yml` 把每个上下文的 mapper 包（`com.galaplat.mfi.<context>.infrastructure.persistence`）
+逐个钉在 `INFO`，SQL 调试只能在 gitignored 的 `application-local.yml` 里临时取消注释（§15）。
 
 ---
 
@@ -976,3 +964,53 @@ PPID"的入口；P7 补上前端与控制台，并第一次把 §8 的全部端�
 剩下的 **P8b 真证书联调仍阻塞在外部输入**（厂商真实客户端证书），§13.2 列出的 5 项风险——真实证书链与 CN 校验、
 `technology` 取值接受度、真实限流阈值、响应字段与文档一致性、苹果侧 PPID 配额——在拿到证书之前无法验证。
 编码过程中的偏离会在本文档同步更新。
+
+---
+
+## 15. 后端结构化重构（R1–R4，2026-10-13）
+
+用户要求"将整个后端系统服务整合成一个服务，采用 DDD 架构重构"。范围限定在本仓库，目标形态是
+**单一 Maven 模块 + 每限界上下文一个顶层包**，上下文内部固定 `domain / application / infrastructure /
+interfaces` 四层。重构期间冻结三样东西：HTTP 契约（`/api/*` 与 `{code, message, data, traceId}` 信封）、
+Flyway 迁移历史（`V1`–`V3` 一行未动，没有新增迁移）、MQ 载荷（`StageMessage` 只带 id，不带业务对象）。
+
+| 步 | 交付 | 提交 |
+|---|---|---|
+| **R1** | `mfi-apple` 与 `mfi-dao` 的源码、资源与 Flyway 迁移全部并入 `mfi-service`，根 POM 只留一个 `<module>`；**包名一个字节未改**，因此这一步是可回滚的纯搬运 | `a69a83a` |
+| **R2** | 包按上下文重排为 `shared / apple / credential / identity / ppid / issuance` 并补齐四层目录；`@TableName`、`@RabbitListener` 队列名、Jackson 反序列化全靠冻结项不受影响 | `e403ed4` |
+| **R3** | 打破跨上下文直连 `infrastructure`/`interfaces` 的 39 处引用：消费方定义端口（`AuditTrail`、`AccountReader`、`TenantProfileReader`、`AccountBindingSource`、`AppleClientProvider`、`TenantEndpointSource`），提供方在自己上下文内加 `@Component` 适配；不变式承载物下沉 `domain`（`AuditFact`、`TenantProfile`、`PpIdAllocation`）；加 `ArchitectureTest` 依赖方向守门 | `fe1bb99` |
+| **R4** | 全量活体回归 + `AGENTS.md`/`README.md`/`docs/DEPLOYMENT.md` 回填本次形态与约束 | 本提交 |
+
+### 偏离与取舍
+
+1. **没有为 PO 再套一层领域实体**。`application` 仍直接使用 MyBatis-Plus 的 PO。理由：这套系统的核心不变式
+   （PPID 不超卖、分片状态跃迁、导出任务只认发起人）是由**条件 UPDATE 的 SQL**保证的，不是由内存对象的 setter
+   保证的；再铺一层贫血实体会把同一份状态写两遍，制造 PO 与实体漂移的机会，而它换来的"纯净"在这规模下没有收益。
+   `domain` 里放的是真正承载规则的东西：五套状态枚举及其跃迁判定、`StageOutcome` 四态、`StageContext`、
+   `SnUtil`、`PpIdAllocation`、`TenantProfile`、`AuditFact`。
+2. **没有加"domain 不得依赖 infrastructure"这条规则**。`issuance.domain` 的 `StageContext`/`StageHandler`/
+   `StageOutcome`/`TokenStatus` 合法地引用**本上下文**的持久层类型；强行切断只会逼出一层为存在而存在的接口。
+   守住的是另外两条更硬的线：跨上下文不得触碰对方内部、`domain` 不得反向依赖 `interfaces`。
+3. **`MfiClientFactory` 留在 `credential.infrastructure.client`，没有搬进 `apple`**。它要读库里的凭证材料，
+   而 `apple` 必须保持"不依赖数据库"的叶子（ArchUnit 有专门一条 `appleStaysALeaf` 钉住它）。
+4. **端口一律由消费方定义**，提供方实现。这条方向决定了依赖箭头指向抽象的所有者，也是 R3 能把生产依赖图
+   收敛成无环图 `shared ← apple ← credential ← identity ← ppid ← issuance` 的原因。
+5. **ArchUnit 用 core + 手工 `ClassFileImporter`，不引 `archunit-junit5`**：少一个依赖，`rule.check(imports)`
+   在普通 `@Test` 里已经够用。测试开头带一条"导入类数必须 > 150"的断言（实测 190）——守门测试最坏的失效方式
+   是它自己没电：一个类都没导进来时，所有规则都会"通过"。
+6. **R3 改的是 mock 的边界，不是断言语义**。留痕相关测试从 mock `OperationLogMapper` 换成 mock `AuditTrail`，
+   取值从 `getAction()` 换成 `action()`；"留痕只记数量、不含 PPID 与 token 原文"这些真实约束一条没松。
+7. **验收脚本新增 `MFI_DB_NAME` / `MFI_RABBITMQ_VHOST` 两个环境变量**（与应用的同名变量成对设置）。
+   P8 第一轮在共享开发环境上挂了 3 条队列账目断言，根因不是重构回归：共享 broker 上留着旧的 4 档延迟配置声明出的
+   `mfi.delay.*`（改档位会让延迟队列改名），而其他开发租户的在途分片会被兜底扫描重新排进队列。指向一套全新 schema +
+   全新 vhost 后 76/76 全绿。踩到两个坑并都写进了脚本注释：Git Bash 会把 `/r4` 这类斜杠开头的参数翻译成
+   `D:/tools/Git/r4`；新建 vhost 必须显式 `set_permissions`，本机 guest 虽带 administrator 标签仍被拒。
+
+### 验证口径
+
+`mvn -o -q test-compile` 通过；`mvn -o test` 187 项通过、3 项跳过（需要真实库的 mapper 并发 IT，无 `MFI_IT_DB` 时自行跳过），
+其中含 5 条架构规则。重构后活体回归全部复跑：P2 48/48、P3 59/59、P4 42/42、P5 54/54、P6 93/93、P8 76/76（全新库 + 全新
+vhost，含断 MQ 自愈与跨租户渗透），0 失败 0 跳过。前端未受影响，未重跑。
+
+**仍未验证**：真实苹果（P8b 阻塞）；`web/dist` 单进程托管沿用 P7 的浏览器实测结论，本轮只改了后端包结构，未重复点击。
+

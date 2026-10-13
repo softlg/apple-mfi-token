@@ -27,6 +27,7 @@ import openpyxl
 
 BASE = os.environ.get("MFI_BASE", "http://localhost:8090")
 MYSQL = os.environ.get("MFI_MYSQL", r"C:\Program Files\MySQL\MySQL Server 8.0\bin\mysql.exe")
+DB = os.environ.get("MFI_DB_NAME", "apple_mfi_token")
 results = []
 
 
@@ -111,7 +112,7 @@ def mysql_row(sql):
     handle.close()
     try:
         proc = subprocess.run([MYSQL, "--defaults-extra-file=" + handle.name, "-N", "-B", "-e", sql,
-                               "apple_mfi_token"], capture_output=True, timeout=60)
+                               DB], capture_output=True, timeout=60)
         out = proc.stdout.decode("utf-8", "replace").strip()
         if proc.returncode != 0:
             print("  mysql 调用失败: " + proc.stderr.decode("utf-8", "replace")[:200])

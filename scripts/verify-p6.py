@@ -40,7 +40,9 @@ from datetime import date
 BASE = os.environ.get("MFI_BASE", "http://localhost:8090")
 STUB_URL = os.environ.get("MFI_STUB_URL", "https://localhost:8443")
 MYSQL = os.environ.get("MFI_MYSQL", r"C:\Program Files\MySQL\MySQL Server 8.0\bin\mysql.exe")
+DB = os.environ.get("MFI_DB_NAME", "apple_mfi_token")
 RABBITMQCTL = os.environ.get("MFI_RABBITMQCTL", r"D:\tools\rabbitmq_server-3.13.7\sbin\rabbitmqctl.bat")
+VHOST = os.environ.get("MFI_RABBITMQ_VHOST", "/")
 APP_LOG = os.environ.get("MFI_APP_LOG", ".dev-certs/app-p6.log")
 STUB_LOG = os.environ.get("MFI_STUB_LOG", ".dev-certs/stub.log")
 EXPORT_DIR = os.environ.get("MFI_EXPORT_DIR", ".dev-certs/export-p6")
@@ -113,7 +115,7 @@ def mysql_run(sql):
         # Windows 版 mysql.exe 默认按本地代码页（GBK）输出管道，不显式指定 utf8mb4 会把中文错误文案读成乱码
         proc = subprocess.run([MYSQL, "--defaults-extra-file=" + handle.name,
                                "--default-character-set=utf8mb4", "-N", "-B", "-e", sql,
-                               "apple_mfi_token"], capture_output=True, timeout=60)
+                               DB], capture_output=True, timeout=60)
         if proc.returncode != 0:
             print("  mysql 调用失败: " + proc.stderr.decode("utf-8", "replace")[:200])
             return ""
@@ -136,7 +138,7 @@ def queue_depths():
     env["PATH"] = env.get("PATH", "") + os.pathsep + os.path.join(erlang, "bin") \
         + os.pathsep + os.path.join(erlang, "erts-14.2.5.4", "bin")
     try:
-        proc = subprocess.run([RABBITMQCTL, "list_queues", "name", "messages", "--quiet"],
+        proc = subprocess.run([RABBITMQCTL, "-p", VHOST, "list_queues", "name", "messages", "--quiet"],
                               capture_output=True, timeout=120, env=env)
     except Exception as error:
         print("  rabbitmqctl 调用异常: " + str(error)[:200])

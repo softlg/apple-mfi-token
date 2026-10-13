@@ -28,7 +28,9 @@ from tempfile import NamedTemporaryFile
 BASE = os.environ.get("MFI_BASE", "http://localhost:8090")
 STUB_URL = os.environ.get("MFI_STUB_URL", "https://localhost:8443")
 MYSQL = os.environ.get("MFI_MYSQL", r"C:\Program Files\MySQL\MySQL Server 8.0\bin\mysql.exe")
+DB = os.environ.get("MFI_DB_NAME", "apple_mfi_token")
 RABBITMQCTL = os.environ.get("MFI_RABBITMQCTL", r"D:\tools\rabbitmq_server-3.13.7\sbin\rabbitmqctl.bat")
+VHOST = os.environ.get("MFI_RABBITMQ_VHOST", "/")
 RABBITMQ_SERVER = os.environ.get("MFI_RABBITMQ_SERVER", r"D:\tools\rabbitmq_server-3.13.7\sbin\rabbitmq-server.bat")
 RABBITMQ_BASE = os.environ.get("MFI_RABBITMQ_BASE", r"D:\tools\rabbitmq_var")
 ERLANG_HOME = os.environ.get("MFI_ERLANG_HOME", r"D:\tools\erlang")
@@ -99,7 +101,7 @@ def mysql_run(sql):
     try:
         proc = subprocess.run([MYSQL, "--defaults-extra-file=" + handle.name,
                                "--default-character-set=utf8mb4", "-N", "-B", "-e", sql,
-                               "apple_mfi_token"], capture_output=True, timeout=60)
+                               DB], capture_output=True, timeout=60)
         if proc.returncode != 0:
             print("  mysql 调用失败: " + proc.stderr.decode("utf-8", "replace")[:200])
             return ""
@@ -127,7 +129,7 @@ def queue_depths():
     if not os.path.exists(RABBITMQCTL):
         return {}
     try:
-        proc = subprocess.run([RABBITMQCTL, "list_queues", "name", "messages", "--quiet"],
+        proc = subprocess.run([RABBITMQCTL, "-p", VHOST, "list_queues", "name", "messages", "--quiet"],
                               capture_output=True, timeout=180, env=erlang_env())
     except Exception as error:
         print("  rabbitmqctl 调用异常: " + str(error)[:200])
@@ -608,7 +610,7 @@ def main():
     artifacts = os.listdir(EXPORT_DIR) if os.path.isdir(EXPORT_DIR) else []
     bad = [name for name in artifacts if not re.match(r"^[A-Za-z0-9._-]{1,128}$", name)]
     check("导出产物目录只含 <任务号>.<后缀>", not bad, bad[:3])
-    tables = mysql_run("select table_name from information_schema.tables where table_schema='apple_mfi_token'")
+    tables = mysql_run("select table_name from information_schema.tables where table_schema='" + DB + "'")
     lowered = tables.lower()
     check("库里没有任何角色/权限/菜单表",
           not re.search(r"role|permission|menu|auth_?scope|data_?scope", lowered),

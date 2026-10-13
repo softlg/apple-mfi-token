@@ -15,17 +15,44 @@ environment variables, build, and the operational knobs (`mfi.pipeline.delay-tie
 
 ## Core Facts
 
-This repository is a Maven multi-module SaaS backend plus a Vue frontend:
+This repository is a single-deployable Maven backend plus a Vue frontend:
 
-- `mfi-apple`: Apple MFI client. Multi-tenant mTLS client factory, request/response models,
-  SSL context building, download-availability parsing. Holds no database or web concerns.
-- `mfi-dao`: MyBatis-Plus persistence. `entity` (PO), `mapper`, tenant interceptor config,
-  and all Flyway migrations under `src/main/resources/db/migration`.
-- `mfi-service`: Spring Boot executable app. Controllers, services, RabbitMQ pipeline listeners,
-  credential crypto, tenant context, sa-token auth config, Excel import/export.
-- `web`: Vue 3 + Element Plus + Vite + TypeScript frontend. Uses **pnpm**, not npm.
+- One Maven module: `mfi-service` (root `pom.xml` is just the Spring Boot parent aggregator).
+  The old `mfi-apple` / `mfi-dao` / `mfi-service` split is gone — **bounded contexts are packages,
+  not modules**.
+- `shared/`: cross-cutting kernel. Response envelope and global exception mapping (`api`), health,
+  MyBatis-Plus tenant rewriting and its global-table whitelist (`persistence`), tenant context,
+  sa-token wiring and owner re-read (`tenant`).
+- `apple/`: Apple MFI anti-corruption layer. `MfiTokenClient`, request/response models, SSL context
+  building, download-availability parsing. Holds no database or web concerns; the per-tenant client
+  factory (`MfiClientFactory`) lives in `credential/infrastructure/client` because it needs the
+  stored certificate.
+- `credential/`: Apple client certificate material at rest, its encryption, the per-tenant MFI
+  endpoint, and `MfiClientFactory`. Exposes the `AppleClientProvider` / `TenantEndpointSource`
+  domain ports.
+- `identity/`: users, tenants, members, tenant config, login/session, profile, and the audit
+  trail. Exposes `AuditTrail`, `AccountReader`, `TenantProfileReader` application ports and
+  `AccountBindingSource` consumption in `shared`.
+- `ppid/`: PPID pool, Excel import, allocation, and CAS quantity decrement.
+- `issuance/`: the application aggregate. Five-stage pipeline, tokens, progress, replay, export,
+  destroy.
+- `web/`: Vue 3 + Element Plus + Vite + TypeScript. Uses **pnpm**, not npm.
 
-Most changes should stay inside one module. Cross-module edits need a clear business reason.
+Every business context keeps the same four layers inside `mfi-service/src/main/java/com/galaplat/mfi/<context>`:
+`domain` (statuses, invariants, the ports it needs), `application` (use cases and orchestration),
+`infrastructure` (`persistence` / `client` / `mq` / `excel` / `sn` adapters), `interfaces`
+(inbound controllers, request/VO shapes, MQ listeners).
+
+**Cross-context calls go through a port, never through another context's internals.**
+`mfi-service/src/test/java/com/galaplat/mfi/architecture/ArchitectureTest.java` enforces this and
+runs in `mvn test`: no context's `infrastructure`/`interfaces` may be referenced from outside that
+context, the context graph must stay cycle-free, `apple` must stay a leaf, `shared` must know no
+business context, and `domain` must not reach into `interfaces`. The production direction that
+actually holds today is `shared ← apple ← credential ← identity ← ppid ← issuance`.
+
+Most changes should stay inside one context. Cross-context edits need a clear business reason, and
+the accepted shape is: the **consumer** declares the port in its own `domain`/`application`, and the
+**provider** adds a `@Component` adapter in its own `infrastructure`.
 
 ### Non-negotiable product constraints
 
@@ -52,11 +79,12 @@ Verified on the development host:
 
 ## Must
 
-- Read only the smallest set of files needed to act: root `pom.xml`, the target module `pom.xml`,
-  the affected `controller/service/mapper/entity`, related DTO/VO classes, and
+- Read only the smallest set of files needed to act: root `pom.xml`, the affected
+  `domain/application/infrastructure/interfaces` classes inside one context, and
   `mfi-service/src/main/resources/application.yml` when config behavior matters.
-- Make the smallest safe change. Keep edits inside one module unless the requirement clearly crosses
-  boundaries.
+- Make the smallest safe change. Keep edits inside one context unless the requirement clearly
+  crosses boundaries; when it does, follow the port/adapter shape above and let `mvn test`'s
+  ArchitectureTest prove it.
 - Follow the existing Java style: 4-space indentation, one top-level class per file, constructor
   injection, current Lombok usage.
 - Add a Flyway migration for **every** schema change. Never edit an applied migration, and never
@@ -112,15 +140,21 @@ Verified on the development host:
 
 Review these carefully before editing:
 
-- `mfi-apple/src/main/java/com/galaplat/mfi/apple` — per-tenant mTLS construction and caching
-- `mfi-service/src/main/java/com/galaplat/mfi/credential` — credential encryption at rest
+- `mfi-service/src/main/java/com/galaplat/mfi/apple` — per-tenant mTLS construction and caching
+- `mfi-service/src/main/java/com/galaplat/mfi/credential` — credential material encryption at rest
 - `web/src/pages/CredentialView.vue` — PEM upload; plaintext must stay in memory only, because
   accessibility trees expose rendered input values, so never bind PEM text into a visible control
-- `mfi-service/src/main/java/com/galaplat/mfi/pipeline` — five-stage MQ listeners, delay, retry, DLQ
-- `mfi-service/src/main/java/com/galaplat/mfi/security` — `TenantContext`, owner checks, sa-token rules
-- `mfi-dao/src/main/java/com/galaplat/mfi/dao/mybatis` — tenant SQL rewriting and its whitelist
-- `mfi-dao/src/main/resources/db/migration` — schema history
-- `mfi-service/src/main/java/com/galaplat/mfi/service/ppid` — PPID allocation and quantity decrement
+- `mfi-service/src/main/java/com/galaplat/mfi/issuance/application` (StageRunner, PipelineScanner,
+  handlers) and `issuance/infrastructure/mq` — five-stage listeners, delay tiers, retry, DLQ
+- `mfi-service/src/main/java/com/galaplat/mfi/shared/tenant` — `TenantContext`, owner re-read,
+  sa-token rules
+- `mfi-service/src/main/java/com/galaplat/mfi/shared/persistence` — tenant SQL rewriting and its
+  global-table whitelist
+- `mfi-service/src/main/resources/db/migration` — schema history
+- `mfi-service/src/main/java/com/galaplat/mfi/ppid/application` — PPID allocation and quantity
+  decrement
+- `mfi-service/src/test/java/com/galaplat/mfi/architecture/ArchitectureTest.java` — the dependency
+  gate itself; weakening it to make a change pass is a design regression, not a fix
 
 These paths affect cross-tenant data isolation, async retries, PPID oversell prevention, and secret
 handling. A mistake here leaks another tenant's data or double-spends PPID quantity at Apple.
@@ -130,7 +164,8 @@ handling. A mistake here leaks another tenant's data or double-spends PPID quant
 - Navigation and existing code paths: use `rg`.
 - Backend:
   - `mvn -q -DskipTests compile`
-  - `mvn test`
+  - `mvn test` (unit tests plus the ArchitectureTest dependency gate; the three mapper tests that
+    need a real database skip themselves when it is absent)
   - `mvn -pl mfi-service spring-boot:run`
 - Frontend (from `web/`):
   - `pnpm install`
@@ -140,13 +175,19 @@ handling. A mistake here leaks another tenant's data or double-spends PPID quant
 - Tenant isolation is a required test dimension: any new query needs an assertion that another
   tenant cannot see the row.
 - Pipeline changes are verified against a stubbed Apple server, not real Apple credentials.
+- End-to-end acceptance runs `scripts/verify-p*.py` against a live app. Those scripts read
+  `MFI_DB_NAME` and `MFI_RABBITMQ_VHOST`; for a deterministic queue/topology count, point them at a
+  fresh schema and vhost instead of the shared development ones — the shared broker keeps stale
+  `mfi.delay.*` queues from older `delay-tiers` settings and other tenants' in-flight shards.
 
 ## Testing
 
-Tests live under each module in Maven standard layout (`src/test/java`). Cover at minimum:
-tenant isolation on every mapper, PPID allocation boundaries and concurrency, credential
-round-trip encryption, MQ consumer idempotency under duplicate delivery, and the
-transaction-rollback-does-not-publish-message guarantee.
+Tests live under `mfi-service/src/test/java` in Maven standard layout, mirroring the context
+packages. Cover at minimum: tenant isolation on every mapper, PPID allocation boundaries and
+concurrency, credential round-trip encryption, MQ consumer idempotency under duplicate delivery,
+the transaction-rollback-does-not-publish-message guarantee, and dependency direction
+(ArchitectureTest). When a use case stops talking to another context's mapper directly and starts
+calling a port, its test mocks the port — not the provider's adapter.
 
 ## Commit & PR
 
