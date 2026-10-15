@@ -55,7 +55,8 @@ public class FileNameStageHandler implements StageHandler {
         FileNameListResponse response = client.getFileNames(requestId);
         List<String> fileNames = response.getFileNames();
         if (fileNames == null || fileNames.isEmpty()) {
-            if (!response.isSuccess() && isClientError(response.getCode())) {
+            // 文件还没生成是常态，按苹果的 retry_download_after 等待；只有永久性拒绝才判死
+            if (!response.isSuccess() && response.isPermanentRejection()) {
                 return StageOutcome.dead(Stage.FILE_NAME, "苹果拒绝返回文件列表: " + response.briefError());
             }
             LocalDateTime ready = MfiUtcTime.nextAttempt(response.getRetryDownloadAfter());
@@ -86,10 +87,6 @@ public class FileNameStageHandler implements StageHandler {
         log.info("文件清单已登记: shardId={}, requestId={}, files={}, traceId={}",
                 context.shardId(), requestId, rows.size(), context.traceId());
         return StageOutcome.advance(Stage.FILE_NAME);
-    }
-
-    private static boolean isClientError(Integer code) {
-        return code != null && code >= 400 && code < 500;
     }
 
 }

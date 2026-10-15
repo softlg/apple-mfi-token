@@ -6,6 +6,7 @@ import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.Data;
+import lombok.ToString;
 
 import java.time.LocalDateTime;
 
@@ -14,8 +15,12 @@ import java.time.LocalDateTime;
  *
  * <p>{@code certCipher} / {@code keyCipher} 是 AES-256-GCM 密文，明文永不入库、永不回显、永不进日志。
  * 展示只允许用 {@code fingerprint}/{@code certSubject}/{@code certNotAfter} 这三项元数据。
+ *
+ * <p>密文本身也从 {@code @Data} 生成的 toString 里排除：漏出去的不是明文，但它带着 IV 与认证标签，
+ * 配上泄露的主密钥就足以还原证书，而一次 {@code log.debug("{}", credential)} 是不需要人刻意的。
  */
 @Data
+@ToString(exclude = {"certCipher", "keyCipher"})
 @TableName("t_tenant_credential")
 public class TenantCredentialPO {
 

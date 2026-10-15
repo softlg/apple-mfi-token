@@ -116,6 +116,19 @@ class FileNameStageHandlerTest {
     }
 
     @Test
+    void rateLimitedFileListWaitsInsteadOfDying() throws IOException {
+        FileNameListResponse response = new FileNameListResponse();
+        response.setCode(429);
+        response.setErrorCode("too_many_requests");
+        when(client.getFileNames(REQUEST_ID)).thenReturn(response);
+
+        // 429 是"请求太多，稍后再来"，判死会把已经花掉苹果额度的申请单永久作废
+        StageOutcome outcome = handler.handle(context());
+
+        assertEquals(StageOutcome.Kind.WAIT, outcome.kind());
+    }
+
+    @Test
     void serverErrorWithoutReadyTimeWaitsByDefault() throws IOException {
         FileNameListResponse response = new FileNameListResponse();
         response.setCode(503);

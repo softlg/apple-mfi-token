@@ -4,11 +4,10 @@ import com.galaplat.mfi.issuance.domain.Stage;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
-import com.galaplat.mfi.issuance.application.StageRunner;
 
 /**
  * 一个阶段处理的结论。只有四种，刻意不让处理器自己写状态机：状态跃迁的正确性
- * （CAS 前态、重试计数、消息投递）全部集中在 {@link StageRunner}，处理器只回答"这次怎么样"。
+ * （CAS 前态、重试计数、消息投递）全部集中在应用层的 StageRunner，处理器只回答"这次怎么样"。
  *
  * @param kind       结论类型
  * @param stage      本次处理的阶段，用于跃迁时校验前态

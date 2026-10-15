@@ -3,13 +3,12 @@ package com.galaplat.mfi.issuance.domain;
 import com.galaplat.mfi.issuance.domain.Stage;
 
 import java.io.IOException;
-import com.galaplat.mfi.issuance.application.StageRunner;
 import com.galaplat.mfi.shared.api.BizException;
 
 /**
  * 一个阶段的业务处理。实现类只做三件事：读库、调苹果、把结果写成 {@link StageOutcome}。
  *
- * <p>不写状态机、不投消息、不绑租户上下文——那些都在 {@link StageRunner} 里，五个阶段共用一套
+ * <p>不写状态机、不投消息、不绑租户上下文——那些都在应用层的 StageRunner 里，五个阶段共用一套
  * 跃迁与重试语义。这样"重试上限""延迟档位""死信"只有一处实现，改一处就五个阶段同时生效。
  *
  * <p>异常约定：{@link IOException}（网络、握手、解析）视为暂时故障，按退避重试；

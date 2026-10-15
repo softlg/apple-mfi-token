@@ -52,4 +52,16 @@ public class MfiResponse {
         return "errorCode=" + errorCode + ", code=" + code + ", message=" + errorMessage;
     }
 
+    /**
+     * 这个失败是否"再试也不会变好"，调用方据此决定终态失败还是退避重试。
+     *
+     * <p>{@code code} 是 HTTP 状态码（由客户端在解析后统一覆盖），不是苹果错误体里的同名字段。
+     * 4xx 里绝大多数确实是证书权限、PPID 无效这类配置问题，重试只会白占出口 IP 配额；但 429 是苹果
+     * 对同源 IP 的限流、408 是它前面网关的超时，两者都属于"稍后再来"。把它们判成终态失败，一次限流
+     * 就会打死整片已扣额度的 token，只能人工重放。
+     */
+    public boolean isPermanentRejection() {
+        return code != null && code >= 400 && code < 500 && code != 408 && code != 429;
+    }
+
 }

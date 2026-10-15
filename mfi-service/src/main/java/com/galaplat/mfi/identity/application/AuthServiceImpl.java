@@ -1,6 +1,5 @@
 package com.galaplat.mfi.identity.application;
 
-import cn.dev33.satoken.session.SaSession;
 import cn.dev33.satoken.stp.StpUtil;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.galaplat.mfi.apple.MfiEndpoints;

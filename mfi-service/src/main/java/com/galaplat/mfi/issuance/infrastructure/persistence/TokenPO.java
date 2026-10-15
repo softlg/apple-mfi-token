@@ -6,6 +6,7 @@ import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.Data;
+import lombok.ToString;
 
 import java.time.LocalDateTime;
 
@@ -17,8 +18,13 @@ import java.time.LocalDateTime;
  *
  * <p>{@code authEntityId}、{@code encodedToken}、{@code accessoryUUID} 都是凭证材料，
  * 禁止进日志、错误消息与操作日志明细。
+ *
+ * <p>{@code @ToString(exclude)} 是这条红线唯一无法靠"少写日志"守住的口子：{@code @Data} 生成的
+ * toString 会把上面几列整个带出来，一次 {@code log.debug("{}", token)} 或异常拼接就漏了。
+ * 把敏感列从 toString 里排除，等于让误用变成无害输出。
  */
 @Data
+@ToString(exclude = {"ppid", "authEntityId", "accessoryUUID", "secretKey", "encodedToken"})
 @TableName("t_token")
 public class TokenPO {
 

@@ -55,8 +55,8 @@ public class ApplyStageHandler implements StageHandler {
         MfiTokenClient client = clientFactory.forTenant(context.tenantId());
         MfiResponse response = client.requestAuthEntities(shard.getPpid(), count);
         if (!response.isSuccess()) {
-            // 4xx 是证书权限、PPID 无效这类配置问题，重试只会白占出口 IP 配额；5xx 交给上层退避
-            if (isClientError(response.getCode())) {
+            // 只有"重试也不会变好"的 4xx 才终态失败；限流与网关超时交给上层退避，见 MfiResponse 的同名方法
+            if (response.isPermanentRejection()) {
                 return StageOutcome.dead(Stage.APPLY, "苹果拒绝申请: " + response.briefError());
             }
             throw new IOException("苹果申请认证实体失败: " + response.briefError());
@@ -68,10 +68,6 @@ public class ApplyStageHandler implements StageHandler {
         log.info("APPLY 完成: shardId={}, count={}, requestId={}, traceId={}",
                 context.shardId(), count, requestId, context.traceId());
         return StageOutcome.advance(Stage.APPLY, requestId);
-    }
-
-    private static boolean isClientError(Integer code) {
-        return code != null && code >= 400 && code < 500;
     }
 
 }

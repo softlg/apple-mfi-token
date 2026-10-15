@@ -104,6 +104,15 @@ class ApplyStageHandlerTest {
     }
 
     @Test
+    void rateLimitedIsBackedOffNotKilled() throws IOException {
+        when(client.requestAuthEntities("C00EXAMPLEPPID", 20)).thenReturn(error(429, "too_many_requests"));
+
+        // 429 与 408 是"稍后再来"，不是配置错误：判成 DEAD 会让一次限流打死整片已扣额度的 token，
+        // 只能人工重放。交给上层退避重试。
+        assertThrows(IOException.class, () -> handler.handle(context()));
+    }
+
+    @Test
     void successAdvancesWithRequestId() throws IOException {
         MfiResponse response = new MfiResponse();
         response.setCode(200);

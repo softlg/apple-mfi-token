@@ -24,10 +24,9 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import com.galaplat.mfi.issuance.application.pipeline.handler.RegisterStageHandler;
 
 /**
- * 销毁未使用的认证实体：把"已下载到本系统、从没注册回苹果"的 token 在苹果侧作废，额度还给 PPID。
+ * 销毁未使用的认证实体：把"已下载到本系统、从没注册回苹果"的 token 在苹果侧作废。
  *
  * <p>四条形制来自"不可逆"这三个字：
  * <ol>
@@ -40,6 +39,16 @@ import com.galaplat.mfi.issuance.application.pipeline.handler.RegisterStageHandl
  * </ol>
  *
  * <p>结果如实回数量而不抛异常：半途失败意味着"确实已经有一部分没了"，把它压成错误响应反而瞒住了事实。
+ *
+ * <p>两处已知的边界，都不靠这里偷偷改：
+ * <ul>
+ *   <li>不回补 PPID 池的 {@code applied_quantity}。苹果销毁后是否把 quantity 还给该 PPID 没有实测依据，
+ *       本地先加回余量会让本地账比苹果宽松，方向上更容易超发；口径等 P8b 真证书联调确认，
+ *       条件更新 SQL 已经在 {@code PpIdMapper.restore} 里备好。</li>
+ *   <li>候选集与 {@code markDestroyed} 之间没有独占：同一时刻 REGISTER 若把某行改成了 REGISTERED，
+ *       这里的影响行数会少于提交数（只告警）。销毁的是苹果侧仍是 unused 的实体，注册过的会被苹果拒绝，
+ *       所以后果是"这批白试一次"，而不是把已交付的 token 打死。</li>
+ * </ul>
  */
 @Slf4j
 @Service

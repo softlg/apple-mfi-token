@@ -192,9 +192,12 @@ PENDING --CAS 领取--> PROCESSING --ADVANCE--> 下一阶段 PENDING
   （`worker-size` / `queue-capacity`）里跑；轮询 `GET /api/export-tasks/{taskNo}` 到 SUCCESS 后
   `GET /api/export-tasks/{taskNo}/download` 取件。产物含 token 原文，因此**只认发起人**：别人连任务状态都读不到。
   文件名按 RFC 5987 的 `filename*=UTF-8''` 给出。
-- 销毁 `POST /api/tokens/destroy` 是本服务唯一"不可逆且把额度还给 PPID"的入口，四条形制：仅 owner，且必须
+- 销毁 `POST /api/tokens/destroy` 是本服务唯一"不可逆"的入口，四条形制：仅 owner，且必须
   把申请单号**原样再输一遍**（二次确认不是复选框）；只对 `ISSUED` 行发起；逐批推进、每批成功即单独落库，
   一旦某批被拒就停手，剩下的留机会；单次有数量上限，超限留给下一次点击。
+  销毁只作废苹果侧的实体，**不回补 PPID 池的 `applied_quantity`**：苹果收到销毁请求后是否把这份 quantity
+  还给该 PPID 尚无实测依据，提前在本地加回余量会让本地比苹果宽松，反而更容易超发。`PpIdMapper.restore`
+  已按条件更新写好，等 P8b 真证书联调确认口径后再接上。
 
 ---
 

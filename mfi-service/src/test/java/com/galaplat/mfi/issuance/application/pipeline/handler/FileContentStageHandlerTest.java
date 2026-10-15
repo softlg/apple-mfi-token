@@ -7,6 +7,7 @@ import com.galaplat.mfi.credential.domain.AppleClientProvider;
 import com.galaplat.mfi.issuance.domain.Stage;
 import com.galaplat.mfi.shared.api.BizException;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationPO;
+import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationPpidMapper;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationPpidPO;
 import com.galaplat.mfi.issuance.infrastructure.persistence.TokenFilePO;
 import com.galaplat.mfi.issuance.infrastructure.persistence.TokenPO;
@@ -42,8 +43,9 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
- * FILE_CONTENT 阶段。这里定着两条会直接影响对账的规矩：按文件推进（已成功的文件不重复下载），
- * 以及 accessory_uuid 在下载时就生成并随 token 落库（注册重试才能复用同一个配件 UUID）。
+ * FILE_CONTENT 阶段。这里定着三条会直接影响对账的规矩：按文件推进（已成功的文件不重复下载），
+ * 以及 accessory_uuid 在下载时就生成并随 token 落库（注册重试才能复用同一个配件 UUID），
+ * 以及每轮之前必须确认分片租约还在自己手里（否则同一跳会出现两个消费者）。
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -63,13 +65,15 @@ class FileContentStageHandlerTest {
     private TokenFileMapper tokenFileMapper;
     @Mock
     private TokenMapper tokenMapper;
+    @Mock
+    private ApplicationPpidMapper shardMapper;
 
     private FileContentStageHandler handler;
     private ApplicationPpidPO shard;
 
     @BeforeEach
     void setUp() {
-        handler = new FileContentStageHandler(clientFactory, tokenFileMapper, tokenMapper);
+        handler = new FileContentStageHandler(clientFactory, tokenFileMapper, tokenMapper, shardMapper);
         shard = new ApplicationPpidPO();
         shard.setId(SHARD_ID);
         shard.setTenantId(TENANT_ID);
@@ -79,6 +83,8 @@ class FileContentStageHandlerTest {
         shard.setStage(Stage.FILE_CONTENT.name());
         shard.setAppleRequestUuid(REQUEST_ID);
         when(clientFactory.forTenant(TENANT_ID)).thenReturn(client);
+        // 默认续租成功，即"租约还在本消费者手里"；只有让位用例把它改成 0
+        when(shardMapper.touchProcessing(TENANT_ID, SHARD_ID, Stage.FILE_CONTENT.name())).thenReturn(1);
     }
 
     @Test
@@ -180,6 +186,24 @@ class FileContentStageHandlerTest {
         verify(client, times(1)).downloadTokenFile(eq(REQUEST_ID), anyString());
         verify(tokenFileMapper).markDownloaded(TENANT_ID, 12L, 1);
         verify(tokenFileMapper, never()).markDownloaded(eq(TENANT_ID), eq(11L), anyInt());
+    }
+
+    @Test
+    void lostLeaseHandsTheShardBackAndStopsFetching() throws IOException {
+        when(tokenFileMapper.selectByShard(TENANT_ID, SHARD_ID)).thenReturn(List.of(
+                file(11L, "tokens-1.xlsx", "PENDING", 0),
+                file(12L, "tokens-2.xlsx", "PENDING", 0)));
+        when(client.downloadTokenFile(REQUEST_ID, "tokens-1.xlsx"))
+                .thenReturn(TokenFileDownload.ok(200, List.of(row("C00EXAMPLEPPID", "token-9", "B9", "CRC9"))));
+        // 第二次续租返回 0：分片已被兜底扫描复位或被别的消费者领走，继续下载就是两个消费者同一跳各调一次苹果
+        when(shardMapper.touchProcessing(TENANT_ID, SHARD_ID, Stage.FILE_CONTENT.name())).thenReturn(1, 0);
+
+        StageOutcome outcome = handler.handle(context());
+
+        // 让位必须是等待而不是前进：这一跳还有文件没下，判成功会让后面的收口校验数到缺货
+        assertEquals(StageOutcome.Kind.WAIT, outcome.kind());
+        verify(client, times(1)).downloadTokenFile(eq(REQUEST_ID), anyString());
+        verify(tokenFileMapper, never()).markDownloaded(eq(TENANT_ID), eq(12L), anyInt());
     }
 
     private static TokenFileRow row(String ppid, String tokenId, String encoded, String crc32) {

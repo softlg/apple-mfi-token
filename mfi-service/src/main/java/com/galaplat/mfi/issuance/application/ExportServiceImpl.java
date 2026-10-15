@@ -326,10 +326,14 @@ public class ExportServiceImpl implements ExportService {
         return ExportFormat.XLSX.name().equals(format) ? XLSX_MEDIA : CSV_MEDIA;
     }
 
+    /**
+     * 导出条件序列化成快照。异常只打原因不打内容：快照里可能带租户的 PPID 明文，而它不在日志红线之外。
+     */
     private String writeSnapshot(ExportParams params) {
         try {
             return objectMapper.writeValueAsString(params);
         } catch (Exception e) {
+            log.error("导出条件快照序列化失败", e);
             throw new BizException(ErrorCode.SYSTEM_ERROR, "导出条件快照生成失败，请重试");
         }
     }
@@ -341,6 +345,8 @@ public class ExportServiceImpl implements ExportService {
         try {
             return objectMapper.readValue(snapshot, ExportParams.class);
         } catch (Exception e) {
+            // 同上：库里那一列坏了的时候，只把栈留下来，不把快照原文写进日志
+            log.error("导出条件快照反序列化失败", e);
             throw new BizException(ErrorCode.SYSTEM_ERROR, "导出条件快照不可读，请重新发起导出");
         }
     }

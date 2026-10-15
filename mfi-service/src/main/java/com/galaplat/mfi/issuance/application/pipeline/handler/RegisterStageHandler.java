@@ -8,6 +8,7 @@ import com.galaplat.mfi.issuance.domain.Stage;
 import com.galaplat.mfi.identity.domain.TenantConfigKey;
 import com.galaplat.mfi.shared.api.BizException;
 import com.galaplat.mfi.issuance.infrastructure.persistence.TokenPO;
+import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationPpidMapper;
 import com.galaplat.mfi.issuance.infrastructure.persistence.TokenMapper;
 import com.galaplat.mfi.issuance.domain.StageContext;
 import com.galaplat.mfi.issuance.domain.StageHandler;
@@ -17,6 +18,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -36,12 +38,14 @@ public class RegisterStageHandler implements StageHandler {
     private final AppleClientProvider clientFactory;
     private final TokenMapper tokenMapper;
     private final TenantConfigService configService;
+    private final ApplicationPpidMapper shardMapper;
 
     public RegisterStageHandler(AppleClientProvider clientFactory, TokenMapper tokenMapper,
-                               TenantConfigService configService) {
+                               TenantConfigService configService, ApplicationPpidMapper shardMapper) {
         this.clientFactory = clientFactory;
         this.tokenMapper = tokenMapper;
         this.configService = configService;
+        this.shardMapper = shardMapper;
     }
 
     @Override
@@ -66,6 +70,13 @@ public class RegisterStageHandler implements StageHandler {
 
         int registered = 0;
         for (int from = 0; from < pending.size(); from += batchSize) {
+            // 每批之前续租：注册是不可逆动作，两个消费者同抢一跳只会让后半批撞上"实体已是 used"的错误。
+            // 这一跳的耗时上界是"批数 × 单批苹果调用"，只靠 claim 时的那次写入撑不住。
+            if (shardMapper.touchProcessing(tenantId, shardId, Stage.REGISTER.name()) == 0) {
+                log.warn("分片租约已不在本消费者手里，停止后续批次: shardId={}, registered={}, traceId={}",
+                        shardId, registered, context.traceId());
+                return StageOutcome.waitUntil(Stage.REGISTER, LocalDateTime.now(), "分片租约已被接管");
+            }
             List<TokenPO> chunk = pending.subList(from, Math.min(from + batchSize, pending.size()));
             registered += registerOneBatch(client, context, chunk);
         }

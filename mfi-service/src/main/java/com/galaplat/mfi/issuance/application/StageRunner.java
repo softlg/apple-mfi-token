@@ -43,6 +43,10 @@ import com.galaplat.mfi.issuance.domain.StageOutcome;
  *       在原队列重投。所有失败都收敛成 {@link StageOutcome}；兜不住的异常就地记错误，把分片留给
  *       扫描复位。</li>
  * </ol>
+ *
+ * <p>领取成功到跃迁落库之间，分片行只剩 {@code update_time} 能证明消费者还活着。单跳一次的阶段（APPLY、
+ * FILE_NAME、FINISH）由苹果调用的超时天然界定；按文件、按批循环的两跳（FILE_CONTENT、REGISTER）必须在
+ * 每轮之前续租，否则一片大申请会被兜底扫描误判成消费者已死并复位，出现同一跳两个消费者。
  */
 @Slf4j
 @Component
@@ -114,6 +118,8 @@ public class StageRunner {
 
         boolean acquired = false;
         try {
+            // 早到与闸门两条退路都在占额度之前：没干活就不该占着租户的苹果额度。
+            // 代价是这一跳已经领走的状态必须先落回 PENDING（hold 里带 CAS），否则分片会卡在 PROCESSING。
             LocalDateTime due = shard.getNextExecuteTime();
             if (due != null && due.isAfter(LocalDateTime.now().plusSeconds(EARLY_TOLERANCE_SECONDS))) {
                 log.info("分片早到，按原计划重排: shardId={}, stage={}, due={}", shardId, stage, due);
@@ -227,6 +233,10 @@ public class StageRunner {
      *
      * <p>{@code retryCount} 原样传回是有意为之：等待不是失败，苹果生成文件等了三个小时不应该消耗重试次数，
      * 否则一次大文件申请会在几个小时内被自己的等待耗进死信队列。
+     *
+     * <p>实际等待是"向上取整到最近的延迟档位"，所以比 {@code executeAt} 晚到一档是常态：闸门重排配置成
+     * 30 秒，最小档位 1 分钟时它等 1 分钟。宁可晚到也不能没有队列可投——晚一分钟只是多等，
+     * 而精确到毫秒的等待需要额外的档位队列与一次滚动升级。
      */
     private void hold(StageMessage message, Stage stage, int retryCount, LocalDateTime executeAt, String reason) {
         LocalDateTime due = executeAt == null ? LocalDateTime.now() : executeAt;

@@ -141,9 +141,10 @@ springdoc:
 logging:
   level:
     root: INFO
-    com.galaplat.mfi: DEBUG
-    # mapper 必须逐个上下文钉在 INFO：DEBUG 会把 SQL 与占位符实参整条打进日志，
-    # 里面就是 PPID、凭证密文这类租户数据。本地要查 SQL 只在 application-local.yml 里开。
+    # 业务包出厂即 INFO：DEBUG 会把每条 log.debug 打开，而 @Data 生成的 toString 带着凭证密文与
+    # token 原文。本地要 DEBUG 只在 application-local.yml 里覆盖，不要改这一行提交上来。
+    com.galaplat.mfi: INFO
+    # mapper 再逐个上下文钉一次 INFO：即使上面被人改成 DEBUG，SQL 与占位符实参（PPID、密文）也不该落日志。
     # mapper 接口按上下文放在各自的 infrastructure.persistence 包里，新增上下文要同步加一行。
     com.galaplat.mfi.identity.infrastructure.persistence: INFO
     com.galaplat.mfi.credential.infrastructure.persistence: INFO

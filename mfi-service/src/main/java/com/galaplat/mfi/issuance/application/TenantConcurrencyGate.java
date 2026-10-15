@@ -15,9 +15,8 @@ import java.util.concurrent.Semaphore;
  * 消费者线程与出口带宽占满，其他租户的申请只能干等；而苹果对同源 IP 有隐式限流，超频之后拿到的
  * 是难以定位的 4xx。闸门把"一家占满全局"变成"一家只占自己的额度"。
  *
- * <p>这是尽力而为的限流，不是正确性不变量： permits 变更时替换信号量，此刻仍在旧信号量里执行的调用
- * 会 release 到旧对象上，短时间内的实际并发可能高于或低于配置值。真正的正确性由分片 CAS 与
- * PPID 条件扣减保证，两者都不依赖这里。
+ * <p>这是尽力而为的限流，不是正确性不变量：额度调整与在飞的调用之间没有严格的排他窗口，短时间的
+ * 实际并发可能高于或低于配置值。真正的正确性由分片 CAS 与 PPID 条件扣减保证，两者都不依赖这里。
  */
 @Component
 public class TenantConcurrencyGate {
@@ -36,8 +35,13 @@ public class TenantConcurrencyGate {
      */
     public boolean tryAcquire(long tenantId) {
         int permits = configService.intValue(tenantId, TenantConfigKey.PIPELINE_CONCURRENT_PER_TENANT);
-        Slot slot = slots.compute(tenantId, (key, existing) ->
-                existing != null && existing.permits == permits ? existing : new Slot(permits, new Semaphore(permits, true)));
+        Slot slot = slots.compute(tenantId, (key, existing) -> {
+            if (existing == null) {
+                return new Slot(new ResizableSemaphore(permits), permits);
+            }
+            existing.resizeTo(permits);
+            return existing;
+        });
         return slot.semaphore.tryAcquire();
     }
 
@@ -49,8 +53,53 @@ public class TenantConcurrencyGate {
         }
     }
 
-    /** 一个租户当前生效的额度槽：记录 permits 才能在配置变更时认出旧槽 */
-    private record Slot(int permits, Semaphore semaphore) {
+    /**
+     * 一个租户当前生效的额度槽。
+     *
+     * <p>额度变更时只能就地增减许可数，不能换一个 {@code Semaphore} 对象：换对象会让在飞的调用
+     * release 到新对象上，凭空多出几个许可，同一租户的实际并发就超过配置值——正是闸门要防的那件事。
+     *
+     * <p>{@code permits} 记录"上次生效的额度"，用来把配置值的变化换算成增减量。它只在
+     * {@link ConcurrentHashMap#compute} 里读写（同一 key 的映射函数互斥），volatile 让槽位被别的
+     * 线程读到的是最新值。
+     */
+    private static final class Slot {
+
+        private final ResizableSemaphore semaphore;
+        private volatile int permits;
+
+        private Slot(ResizableSemaphore semaphore, int permits) {
+            this.semaphore = semaphore;
+            this.permits = permits;
+        }
+
+        private void resizeTo(int target) {
+            if (target == permits) {
+                return;
+            }
+            semaphore.resizeBy(target - permits);
+            permits = target;
+        }
+    }
+
+    /**
+     * 可增减许可的信号量：{@code reducePermits} 是 protected，只能靠子类暴露，
+     * 这是 JDK 里调低一个已在使用的信号量上限的唯一办法。
+     */
+    private static final class ResizableSemaphore extends Semaphore {
+
+        private ResizableSemaphore(int permits) {
+            super(permits, true);
+        }
+
+        /** 按差额增减。调低时许可数可以为负（表示"欠着的额度"），已占用的额度回收后自然回到目标值 */
+        private void resizeBy(int delta) {
+            if (delta > 0) {
+                release(delta);
+            } else if (delta < 0) {
+                reducePermits(-delta);
+            }
+        }
     }
 
 }

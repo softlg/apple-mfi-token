@@ -6,6 +6,7 @@ import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.Data;
+import lombok.ToString;
 
 import java.time.LocalDateTime;
 
@@ -14,8 +15,12 @@ import java.time.LocalDateTime;
  *
  * <p>一个账号可加入多个租户，因此它不属于任何单一租户；password_hash 只存 Argon2 哈希，
  * 任何接口都不得回显该列。
+ *
+ * <p>哈希也从 toString 里排除：日志里的 {@code "{}"} 占位会把整个对象带出来，而 Argon2 哈希一旦落进
+ * 日志文件，就等于把可离线破解的凭据交给了任何一个能读日志的人。
  */
 @Data
+@ToString(exclude = "passwordHash")
 @TableName("t_user")
 public class UserPO {
 

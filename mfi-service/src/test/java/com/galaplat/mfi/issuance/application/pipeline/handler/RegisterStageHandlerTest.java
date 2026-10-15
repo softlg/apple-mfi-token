@@ -8,6 +8,7 @@ import com.galaplat.mfi.issuance.domain.Stage;
 import com.galaplat.mfi.identity.domain.TenantConfigKey;
 import com.galaplat.mfi.shared.api.BizException;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationPO;
+import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationPpidMapper;
 import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationPpidPO;
 import com.galaplat.mfi.issuance.infrastructure.persistence.TokenPO;
 import com.galaplat.mfi.issuance.infrastructure.persistence.TokenMapper;
@@ -41,8 +42,9 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
- * REGISTER 阶段。注册在苹果侧不可逆，所以这里只保证三件事：批次大小不超过苹果上限、
- * 提交的是库里已有的 accessory_uuid、以及失败只标记未注册成功的那一批。
+ * REGISTER 阶段。注册在苹果侧不可逆，所以这里只保证四件事：批次大小不超过苹果上限、
+ * 提交的是库里已有的 accessory_uuid、失败只标记未注册成功的那一批、以及每批之前分片租约还在自己手里
+ * （两个消费者同一跳各注册一次，后半批只会撞上"实体已是 used"）。
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -61,13 +63,15 @@ class RegisterStageHandlerTest {
     private TokenMapper tokenMapper;
     @Mock
     private TenantConfigService configService;
+    @Mock
+    private ApplicationPpidMapper shardMapper;
 
     private RegisterStageHandler handler;
     private ApplicationPpidPO shard;
 
     @BeforeEach
     void setUp() throws IOException {
-        handler = new RegisterStageHandler(clientFactory, tokenMapper, configService);
+        handler = new RegisterStageHandler(clientFactory, tokenMapper, configService, shardMapper);
         shard = new ApplicationPpidPO();
         shard.setId(SHARD_ID);
         shard.setTenantId(TENANT_ID);
@@ -77,6 +81,8 @@ class RegisterStageHandlerTest {
         when(clientFactory.forTenant(TENANT_ID)).thenReturn(client);
         when(configService.intValue(TENANT_ID, TenantConfigKey.APPLE_REGISTER_BATCH_SIZE)).thenReturn(2);
         when(client.registerUsedAuthEntitiesBulk(eq(PPID), anyList())).thenReturn(new MfiResponse());
+        // 默认续租成功，即"租约还在本消费者手里"；只有让位用例把它改成 0
+        when(shardMapper.touchProcessing(TENANT_ID, SHARD_ID, Stage.REGISTER.name())).thenReturn(1);
     }
 
     @Test
@@ -161,6 +167,20 @@ class RegisterStageHandlerTest {
 
         verify(tokenMapper).markRegisterFailed(eq(TENANT_ID), eq(List.of(1L, 2L)));
         verify(tokenMapper, never()).markRegistered(anyLong(), anyList());
+    }
+
+    @Test
+    void lostLeaseHandsTheShardBackBeforeTheNextBatch() throws IOException {
+        when(tokenMapper.selectUnregistered(TENANT_ID, SHARD_ID)).thenReturn(tokens(1L, 2L, 3L));
+        when(shardMapper.touchProcessing(TENANT_ID, SHARD_ID, Stage.REGISTER.name())).thenReturn(1, 0);
+
+        StageOutcome outcome = handler.handle(context());
+
+        // 第一批照常注册并落库，第二批让位：WAIT 不消耗重试次数，剩下的批次由下一次投递补上
+        assertEquals(StageOutcome.Kind.WAIT, outcome.kind());
+        verify(client, times(1)).registerUsedAuthEntitiesBulk(eq(PPID), anyList());
+        verify(tokenMapper).markRegistered(TENANT_ID, List.of(1L, 2L));
+        verify(tokenMapper, never()).markRegistered(TENANT_ID, List.of(3L));
     }
 
     private TokenPO token(long id) {

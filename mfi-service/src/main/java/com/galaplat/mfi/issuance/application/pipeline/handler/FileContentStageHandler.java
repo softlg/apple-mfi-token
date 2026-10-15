@@ -8,6 +8,7 @@ import com.galaplat.mfi.issuance.domain.Stage;
 import com.galaplat.mfi.shared.api.BizException;
 import com.galaplat.mfi.issuance.infrastructure.persistence.TokenFilePO;
 import com.galaplat.mfi.issuance.infrastructure.persistence.TokenPO;
+import com.galaplat.mfi.issuance.infrastructure.persistence.ApplicationPpidMapper;
 import com.galaplat.mfi.issuance.infrastructure.persistence.TokenFileMapper;
 import com.galaplat.mfi.issuance.infrastructure.persistence.TokenMapper;
 import com.galaplat.mfi.issuance.domain.StageContext;
@@ -17,6 +18,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -41,12 +43,14 @@ public class FileContentStageHandler implements StageHandler {
     private final AppleClientProvider clientFactory;
     private final TokenFileMapper tokenFileMapper;
     private final TokenMapper tokenMapper;
+    private final ApplicationPpidMapper shardMapper;
 
     public FileContentStageHandler(AppleClientProvider clientFactory, TokenFileMapper tokenFileMapper,
-                                   TokenMapper tokenMapper) {
+                                   TokenMapper tokenMapper, ApplicationPpidMapper shardMapper) {
         this.clientFactory = clientFactory;
         this.tokenFileMapper = tokenFileMapper;
         this.tokenMapper = tokenMapper;
+        this.shardMapper = shardMapper;
     }
 
     @Override
@@ -69,6 +73,13 @@ public class FileContentStageHandler implements StageHandler {
         for (TokenFilePO file : files) {
             if ("SUCCESS".equals(file.getDownloadStatus())) {
                 continue;
+            }
+            // 每个文件之前先续租：这一跳的耗时上界是"文件数 × 单文件下载"，兜底扫描只看 update_time，
+            // 不续租的正常执行会被判成消费者已死并复位，于是同一跳出现两个消费者。
+            if (shardMapper.touchProcessing(tenantId, shardId, Stage.FILE_CONTENT.name()) == 0) {
+                log.warn("分片租约已不在本消费者手里，停止后续下载: shardId={}, traceId={}",
+                        shardId, context.traceId());
+                return StageOutcome.waitUntil(Stage.FILE_CONTENT, LocalDateTime.now(), "分片租约已被接管");
             }
             landed += downloadOne(client, context, file, requestId);
         }

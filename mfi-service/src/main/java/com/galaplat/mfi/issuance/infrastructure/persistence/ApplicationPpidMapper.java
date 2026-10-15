@@ -125,6 +125,25 @@ public interface ApplicationPpidMapper extends BaseMapper<ApplicationPpidPO> {
                  @Param("stage") String stage, @Param("lastError") String lastError);
 
     /**
+     * 心跳续租：只把 {@code update_time} 顶到当前时刻，不碰阶段、状态、重试计数与 next_execute_time。
+     *
+     * <p>{@link #claim} 之后到 {@link #advance} 之间，这一行没有任何写入，而 FILE_CONTENT 与 REGISTER
+     * 两跳是按文件、按批在循环里推进的，耗时上界由文件数决定。兜底扫描按 {@code update_time} 判断
+     * 消费者还在不在，不续租就会把一片正在正常推进的分片提前放回队列。
+     *
+     * <p>返回 0 表示这一行已经不在本消费者手里（被扫描复位、被别的消费者领取或已被改写终态），
+     * 调用方必须立刻让位——继续循环就是两个消费者同一跳各调一次苹果。
+     */
+    @Update("""
+            update t_application_ppid
+            set update_time = now()
+            where tenant_id = #{tenantId} and id = #{shardId} and deleted = 0
+              and stage = #{stage} and stage_status = 'PROCESSING'
+            """)
+    int touchProcessing(@Param("tenantId") long tenantId, @Param("shardId") long shardId,
+                        @Param("stage") String stage);
+
+    /**
      * 兜底扫描：把"该跑却没跑"的分片捞出来补发。
      *
      * <p>必须 {@code @InterceptorIgnore} —— 扫描是跨租户的全局动作，而租户拦截器在上下文缺失时会直接抛错。
@@ -154,9 +173,13 @@ public interface ApplicationPpidMapper extends BaseMapper<ApplicationPpidPO> {
      * <p>这是消费者崩溃或长时间挂死后唯一的自愈路径：行停在 PROCESSING，而
      * {@link #selectDueForRecovery} 只看 PENDING，捞不到它，于是这一片永远没人再碰。
      *
-     * <p>{@code cutoff} 必须明显大于最慢一次阶段执行（下载并解析一份 2000 token 的 xlsx），
-     * 否则会把还在正常跑的分片提前放回队列，出现两个消费者同抢一跳。重复执行是安全的
-     * （CAS 独占 + insert ignore 落 token + 注册复用同一个 accessory_uuid），但没必要常态化。
+     * <p>{@code cutoff} 判的是"这一行最后一次被写入的时刻"（{@code update_time} 由库的 ON UPDATE 维护），
+     * 所以按文件、按批推进的处理器必须用 {@link #touchProcessing} 续租，否则一次跨多个文件的正常执行
+     * 会被误判成消费者已经不在了。
+     *
+     * <p>复位之后的重复执行，代价在五个阶段上并不对称：FILE_CONTENT 与 REGISTER 是增量的
+     * （已成功的文件与批次会被跳过），重复只是白花一次调用；APPLY 在 request id 落库前被复位，则会向苹果
+     * 再多要一批 token，那批额度只能靠与苹果门户对账发现。所以超时要留足余量，不要把这里当常规去重。
      *
      * <p>不改 retry_count：崩溃不是业务失败，把它算进重试次数会让一个稳定推进的申请因为一次进程重启就进死信。
      */
